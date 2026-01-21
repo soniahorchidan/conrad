@@ -42,7 +42,7 @@
     "API_port_ultra": 1236,
     "API_port_relationprediction": 1237,
     "embeddings_path": "./artifacts/models/assets",
-    "load_path": "./artifacts/snapshots/2025.07.20_ultra",
+    "load_path": "./artifacts/snapshots/ultra_fb15k237",
     "log_path": "./artifacts/inference_logs",
     "EXPERIMENTAL_vectordb_backend": "basic",
     "query2box_slack": 0.15,

@@ -40,7 +40,7 @@ benchmark/scripts/generate_calibration.sh --delete-edges-perc 30 --dataset fb15k
 ### 5. Run Benchmarks
 
 ```bash
-cd ml_engine
+cd src
 ./run_benchmarks_sequential.sh
 ```
 
@@ -65,7 +65,7 @@ conrad/
 │   └── scripts/
 │       ├── generate_calibration.sh
 │       └── delete_random_edges.py
-├── ml_engine/
+├── src/
 │   ├── inference/             # Model loading and factory
 │   ├── utils/                 # Utilities
 │   ├── graph_handler/         # Neo4j backend only

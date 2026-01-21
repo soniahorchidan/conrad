@@ -208,7 +208,7 @@ fi
 
 log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
 mkdir -p "${CRC_DATA_DIR}"
-python3 "${REPO_ROOT}/ml_engine/models/topology/simple_calibration_sampler.py" \
+python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
     --generate-3p \
     --generate-2ip \
     --generate-2u \
