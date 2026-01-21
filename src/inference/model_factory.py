@@ -7,8 +7,6 @@ from argparse import Namespace
 from models import (
     ultra_parse_args,
     ModelUtils,
-    MODEL_DEPENDENCIES,
-    NUMNODES_USAGE,
 )
 from conformal_prediction import conformal_prediction_parse_args, VectorConformalRiskControl
 from utils import args2sequence
@@ -94,14 +92,8 @@ class ModelFactory:
         num_nodes = len(self.model_args.db_controller.get_all_node_ids())
         self.model_args.db_controller.close()
 
-        # Check for model dependencies (none expected for conrad models)
-        dependencies = MODEL_DEPENDENCIES.get(self.model_to_infer, [])
-        if dependencies:
-            raise ValueError(f"Model {self.model_to_infer} has unsupported dependencies: {dependencies}")
-
-        # tentative fix for non-inductive models
-        if self.inf_args.model_to_infer in NUMNODES_USAGE:
-            self.model_args.num_nodes = num_nodes
+        # Set num_nodes for all models
+        self.model_args.num_nodes = num_nodes
        
 
         if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
@@ -134,11 +126,6 @@ class ModelFactory:
                 # Create proper args for VectorConformalRiskControl
                 vector_crc_args = conformal_prediction_parse_args({})
                 vector_crc_args.load_path = self.inf_args.load_path
-                
-                # Pass RAPS parameters from inf_args
-                vector_crc_args.disable_raps = getattr(self.inf_args, 'disable_raps', False)
-                vector_crc_args.raps_lamda = getattr(self.inf_args, 'raps_lamda', 1e-3)
-                vector_crc_args.raps_kreg = getattr(self.inf_args, 'raps_kreg', 1)
                 
                 # Pass dataset for dataset-aware caching
                 vector_crc_args.dataset = getattr(self.inf_args, 'dataset', None)

@@ -61,30 +61,6 @@ class ThreeHopPipeline(nn.Module):
         
         # Slack parameter for dynamic threshold calculation
         self.multihop_slack = 0.1
-        
-        # RAPS parameters (set during calibration)
-        self.use_raps = False
-        self.raps_kreg = 1
-        self.raps_lamda = 1e-3
-        self.raps_randomized = True 
-
-    def set_raps_params(self, use_raps: bool = True, kreg: int = 1, lamda: float = 1e-3, randomized: bool = True):
-        """
-        Set RAPS parameters for inference.
-        
-        This should be called after calibration to enable RAPS at inference time.
-        
-        Args:
-            use_raps: Whether to use RAPS
-            kreg: Regularization parameter
-            lamda: Penalty weight
-            randomized: Whether to use randomized RAPS
-        """
-        self.use_raps = use_raps
-        self.raps_kreg = kreg
-        self.raps_lamda = lamda
-        self.raps_randomized = randomized
-        logging.info(f"RAPS parameters set: use_raps={use_raps}, kreg={kreg}, λ={lamda}, randomized={randomized}")
     
     def preprocess(self, general_args: Namespace, args: Namespace):
         # If MultiHopPredictor has its own preprocess logic, call it here
@@ -593,10 +569,7 @@ class ThreeHopPipeline(nn.Module):
 
     def _extract_nodes_from_scores(self, scores: torch.Tensor, threshold: float) -> List[int]:
         """
-        Extract nodes from scores using either RAPS or simple thresholding.
-        
-        If RAPS is enabled (via set_raps_params), uses RAPS Algorithm 3.
-        Otherwise, uses simple threshold-based filtering.
+        Extract nodes from scores using simple thresholding.
         
         Args:
             scores: Score tensor for entities
@@ -605,23 +578,12 @@ class ThreeHopPipeline(nn.Module):
         Returns:
             List of selected entity indices
         """
-        if self.use_raps:
-            # Use RAPS threshold application (Algorithm 3 from paper)
-            from conformal_prediction.raps import apply_raps_threshold
-            return apply_raps_threshold(
-                scores, 
-                threshold, 
-                kreg=self.raps_kreg,
-                lamda=self.raps_lamda,
-                randomized=self.raps_randomized
-            )
-        else:
-            # Simple threshold-based filtering (standard conformal prediction)
-            nonzero_indices = torch.nonzero(scores >= threshold)
-            if nonzero_indices.size(0) > 0:
-                node_dim = scores.dim() - 1
-                return nonzero_indices[:, node_dim].tolist()
-            return []
+        # Simple threshold-based filtering (standard conformal prediction)
+        nonzero_indices = torch.nonzero(scores >= threshold)
+        if nonzero_indices.size(0) > 0:
+            node_dim = scores.dim() - 1
+            return nonzero_indices[:, node_dim].tolist()
+        return []
     
     @staticmethod
     def _extract_nodes_by_threshold(scores, threshold: float) -> set:
@@ -714,20 +676,6 @@ class TwoUnionPipeline(nn.Module):
             self, device, calib_batch_size=calib_batch_size, num_entities=num_entities
         )
         
-        # RAPS parameters
-        self.use_raps = False
-        self.raps_kreg = 1
-        self.raps_lamda = 1e-3
-        self.raps_randomized = True
-    
-    def set_raps_params(self, use_raps: bool = True, kreg: int = 1, lamda: float = 1e-3, randomized: bool = True):
-        """Set RAPS parameters for inference."""
-        self.use_raps = use_raps
-        self.raps_kreg = kreg
-        self.raps_lamda = lamda
-        self.raps_randomized = randomized
-        logging.info(f"RAPS parameters set: use_raps={use_raps}, kreg={kreg}, λ={lamda}, randomized={randomized}")
-    
     def preprocess(self, general_args: Namespace, args: Namespace):
         return self.unified_predictor.preprocess(general_args, args)
     
@@ -956,23 +904,13 @@ class TwoUnionPipeline(nn.Module):
         return batch_results
     
     def _extract_nodes_from_scores(self, scores: torch.Tensor, threshold: float) -> List[int]:
-        """Extract nodes from scores using either RAPS or simple thresholding."""
-        if self.use_raps:
-            from conformal_prediction.raps import apply_raps_threshold
-            return apply_raps_threshold(
-                scores,
-                threshold,
-                kreg=self.raps_kreg,
-                lamda=self.raps_lamda,
-                randomized=self.raps_randomized
-            )
-        else:
-            # Simple threshold-based filtering
-            nonzero_indices = torch.nonzero(scores >= threshold)
-            if nonzero_indices.size(0) > 0:
-                node_dim = scores.dim() - 1
-                return nonzero_indices[:, node_dim].tolist()
-            return []
+        """Extract nodes from scores using simple thresholding."""
+        # Simple threshold-based filtering
+        nonzero_indices = torch.nonzero(scores >= threshold)
+        if nonzero_indices.size(0) > 0:
+            node_dim = scores.dim() - 1
+            return nonzero_indices[:, node_dim].tolist()
+        return []
     
     @torch.no_grad()
     def generateCalibrateSamples(self, save_path: str, db_controller: Any,
@@ -1040,20 +978,6 @@ class TwoIntersectProjectPipeline(nn.Module):
             self, device, calib_batch_size=calib_batch_size, num_entities=num_entities
         )
         
-        # RAPS parameters
-        self.use_raps = False
-        self.raps_kreg = 1
-        self.raps_lamda = 1e-3
-        self.raps_randomized = True
-    
-    def set_raps_params(self, use_raps: bool = True, kreg: int = 1, lamda: float = 1e-3, randomized: bool = True):
-        """Set RAPS parameters for inference."""
-        self.use_raps = use_raps
-        self.raps_kreg = kreg
-        self.raps_lamda = lamda
-        self.raps_randomized = randomized
-        logging.info(f"RAPS parameters set: use_raps={use_raps}, kreg={kreg}, λ={lamda}, randomized={randomized}")
-    
     def preprocess(self, general_args: Namespace, args: Namespace):
         return self.unified_predictor.preprocess(general_args, args)
     
@@ -1387,23 +1311,13 @@ class TwoIntersectProjectPipeline(nn.Module):
         return filtered_nodes
     
     def _extract_nodes_from_scores(self, scores: torch.Tensor, threshold: float) -> List[int]:
-        """Extract nodes from scores using either RAPS or simple thresholding."""
-        if self.use_raps:
-            from conformal_prediction.raps import apply_raps_threshold
-            return apply_raps_threshold(
-                scores,
-                threshold,
-                kreg=self.raps_kreg,
-                lamda=self.raps_lamda,
-                randomized=self.raps_randomized
-            )
-        else:
-            # Simple threshold-based filtering
-            nonzero_indices = torch.nonzero(scores >= threshold)
-            if nonzero_indices.size(0) > 0:
-                node_dim = scores.dim() - 1
-                return nonzero_indices[:, node_dim].tolist()
-            return []
+        """Extract nodes from scores using simple thresholding."""
+        # Simple threshold-based filtering
+        nonzero_indices = torch.nonzero(scores >= threshold)
+        if nonzero_indices.size(0) > 0:
+            node_dim = scores.dim() - 1
+            return nonzero_indices[:, node_dim].tolist()
+        return []
 
 
     @staticmethod

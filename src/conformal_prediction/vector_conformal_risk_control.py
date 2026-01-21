@@ -160,28 +160,7 @@ class VectorConformalRiskControl:
         if not self.data_manager.has_calibration_data():
             raise ValueError("No calibration data available. Call prepare_data first.")
         
-        # Check if RAPS is disabled
-        disable_raps = getattr(self.args, 'disable_raps', False)
-        
-        if disable_raps:
-            logging.info("RAPS is disabled. Using standard conformal prediction.")
-            return self.calibration_manager.calibrate(cal_scores, true_labels)
-        else:
-            # Use RAPS with aggregated scores (Option 3: apply RAPS AFTER MAX aggregation)
-            # This is the correct approach for cascade systems
-            # TUNING: Increase lambda for tighter sets (higher precision)
-            # - lambda controls penalty strength: larger = tighter sets
-            # - k_reg controls when penalties start: larger = more lenient initially
-            kreg = getattr(self.args, 'raps_kreg', 1)  # Default: 1
-            lamda = getattr(self.args, 'raps_lamda', 1e-3)  # Default: 0.001
-            
-            logging.info(f"RAPS parameters: k_reg={kreg}, λ={lamda}")
-            
-            return self.calibration_manager.calibrate_with_raps(
-                cal_scores, true_labels, 
-                kreg=kreg, lamda=lamda, 
-                use_aggregated=True  # Apply RAPS to MAX-aggregated scores
-            )
+        return self.calibration_manager.calibrate(cal_scores, true_labels)
 
     def prepare_calibrate(self, save_path: str, db_controller: Any, 
                          threshold: float = -1, 
@@ -203,38 +182,6 @@ class VectorConformalRiskControl:
         
         logging.info(f"Preparing to calibrate model {self.model_name}")
         metadata = self.calibrate()
-        
-        # Enable RAPS on the model if it was used during calibration
-        disable_raps = getattr(self.args, 'disable_raps', False)
-        
-        if disable_raps:
-            logging.info("RAPS is disabled. Model will use simple thresholding for inference.")
-            # Ensure RAPS is not enabled on the model
-            if self.model is not None and hasattr(self.model, 'set_raps_params'):
-                self.model.set_raps_params(use_raps=False)
-        elif metadata and 'raps_metadata' in metadata and self.model is not None:
-            raps_meta = metadata['raps_metadata']
-            method = raps_meta.get('method')
-            
-            if method == 'RAPS_AGGREGATED':
-                # For aggregated RAPS, preprocessing is already in the scores
-                # At inference, we still need to apply RAPS threshold logic (Algorithm 3)
-                kreg = raps_meta.get('kreg', 1)
-                lamda = raps_meta.get('lamda', 1e-3)
-                randomized = raps_meta.get('randomized', True)
-                
-                if hasattr(self.model, 'set_raps_params'):
-                    self.model.set_raps_params(
-                        use_raps=True,
-                        kreg=kreg,
-                        lamda=lamda,
-                        randomized=randomized
-                    )
-                    logging.info(f"RAPS enabled on model for inference: kreg={kreg}, λ={lamda}")
-            else:
-                # For old per-path RAPS, preprocessing already in thresholds
-                logging.info(f"RAPS was used during calibration (method={method})")
-                logging.info("At inference, using simple thresholding (RAPS already in thresholds)")
         
         logging.info(f"Calibration for model {self.model_name} done!")
         self.metadata = metadata

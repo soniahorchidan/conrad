@@ -151,8 +151,6 @@ def update_hardcoded_lambdas(script_path: str, lambdas_dict: Dict[float, List[fl
 def run_benchmark_sweep(confidence_levels: List[float], output_dir: str, 
                        max_calibration_queries: int = 1600,
                        max_eval_queries: int = 1000,
-                       raps_lambda: float = 0.001,
-                       raps_kreg: int = 1,
                        extra_args: List[str] = None,
                        skip_calibration: bool = False,
                        dataset: str = None) -> str:
@@ -323,8 +321,6 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
     print("="*80)
     
     print(f"\nResults saved to: {results_csv}")
-    print(f"\nTo plot results, run:")
-    print(f"  python plot_crc_results.py {results_csv}")
     
     return results_csv
 
@@ -343,12 +339,6 @@ def main():
                        help="Number of queries for calibration (default: 100)")
     parser.add_argument("--output-dir", type=str, default=None,
                        help="Output directory (default: crc_benchmark_results_TIMESTAMP)")
-    parser.add_argument("--raps-lambda", type=float, default=0.001,
-                       help="RAPS lambda parameter (default: 0.001)")
-    parser.add_argument("--raps-kreg", type=int, default=1,
-                       help="RAPS k_reg parameter (default: 1)")
-    parser.add_argument("--auto-plot", action="store_true",
-                       help="Automatically generate plots after completion")
     parser.add_argument("--skip-calibration", action="store_true",
                        help="Skip calibration step and use existing HARDCODED_LAMBDAS")
     parser.add_argument("--max-eval-queries", type=int, default=1000,
@@ -375,7 +365,6 @@ def main():
     print(f"Dataset: {args.dataset}")
     print(f"Confidence levels: {args.confidence_levels}")
     print(f"Max calibration queries: {args.max_calibration_queries}")
-    print(f"RAPS parameters: lambda={args.raps_lambda}, k_reg={args.raps_kreg}")
     print(f"Output directory: {args.output_dir}")
     if extra_args:
         print(f"Extra args passed through: {' '.join(extra_args)}")
@@ -392,20 +381,10 @@ def main():
         output_dir=args.output_dir,
         max_calibration_queries=args.max_calibration_queries,
         max_eval_queries=args.max_eval_queries,
-        raps_lambda=args.raps_lambda,
-        raps_kreg=args.raps_kreg,
         extra_args=extra_args,
         skip_calibration=args.skip_calibration,
         dataset=args.dataset
     )
-    
-    # Optionally generate plots
-    if args.auto_plot:
-        print("\n" + "="*80)
-        print("GENERATING PLOTS")
-        print("="*80)
-        plot_cmd = ["python", "plot_crc_results.py", results_csv]
-        subprocess.run(plot_cmd)
 
 
 if __name__ == "__main__":

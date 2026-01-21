@@ -578,15 +578,6 @@ def main():
         "--use-hardcoded-lambdas", action="store_true", help="Use hardcoded lambda values from previous calibration run instead of recalibrating"
     )
     parser_validate_crc.add_argument(
-        "--disable-raps", action="store_true", help="Disable RAPS (Regularized Adaptive Prediction Sets) for both calibration and inference"
-    )
-    parser_validate_crc.add_argument(
-        "--raps-lambda", type=float, default=0.0001, help="RAPS lambda parameter (penalty weight). Larger = tighter sets = higher precision. Default: 0.001"
-    )
-    parser_validate_crc.add_argument(
-        "--raps-kreg", type=int, default=1, help="RAPS k_reg parameter (penalty-free threshold). Larger = more lenient. Default: 1"
-    )
-    parser_validate_crc.add_argument(
         "--dataset", type=str, default=None, 
         choices=["fb15k-237", "nell-955"],
         help="Dataset name: fb15k-237 or nell-955 (required for dataset-specific calibration data)"
@@ -632,10 +623,6 @@ def main():
         else:
             logging.warning(f"Unknown dataset '{args_validate_crc.dataset}', using default load_path: {inf_args.load_path}")
     
-    # Add RAPS parameters to inf_args for VectorConformalRiskControl
-    inf_args.disable_raps = args_validate_crc.disable_raps
-    inf_args.raps_lamda = args_validate_crc.raps_lambda
-    inf_args.raps_kreg = args_validate_crc.raps_kreg
     save_path = os.path.join(inf_args.log_path, f"crc_{time_str}")
     os.makedirs(save_path, exist_ok=True)
 

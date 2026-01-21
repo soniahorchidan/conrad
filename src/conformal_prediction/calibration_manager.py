@@ -223,60 +223,6 @@ class CalibrationManager:
         metadata = self.create_metadata(cal_scores, true_labels)
         return metadata
 
-    def calibrate_with_raps(
-        self,
-        cal_scores: Union[np.ndarray, List],
-        true_labels: Union[np.ndarray, List],
-        kreg: int = 1,
-        lamda: float = 1e-3,
-        randomized: bool = True,
-        use_aggregated: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Calibrate with RAPS regularization.
-        
-        Vector models: Apply RAPS penalties to scores, then run CRC calibration.
-        Scalar models: Use original RAPS conformity score method.
-        
-        Args:
-            cal_scores: Calibration scores
-            true_labels: True labels
-            kreg: Number of top-k elements before applying GT-aware penalty (default: 1)
-            lamda: Penalty weight (default: 1e-3)
-            randomized: Whether to use randomized RAPS (for scalar models)
-            use_aggregated: If True, apply RAPS to MAX-aggregated scores (cascade systems)
-            
-        Returns:
-            Calibration metadata with RAPS metadata
-        """
-        from .raps import apply_raps_to_aggregated_scores, apply_raps_to_vector_scores
-
-        # Check if vector model with path-aware data
-        is_path_aware = (isinstance(cal_scores, list) and len(cal_scores) > 0 
-                        and isinstance(cal_scores[0], dict))
-        
-        if is_path_aware and self.is_vector_model:
-            if use_aggregated:
-                # CASCADE: Apply RAPS to MAX-aggregated scores (CORRECT for cascade systems)
-                logging.info(f"Applying RAPS to aggregated scores (kreg={kreg}, λ={lamda:.1e})")
-                cal_scores_regularized = apply_raps_to_aggregated_scores(cal_scores, true_labels, kreg, lamda)
-                method = "RAPS_AGGREGATED"
-            else:
-                # OLD: Apply RAPS to individual path scores (not recommended for cascade)
-                logging.info(f"Applying GT-aware RAPS to individual paths (kreg={kreg}, λ={lamda:.1e})")
-                cal_scores_regularized = apply_raps_to_vector_scores(cal_scores, true_labels, kreg, lamda)
-                method = "RAPS_VECTOR_GT_AWARE"
-            
-            metadata = self.create_metadata(cal_scores_regularized, true_labels)
-            metadata["raps_metadata"] = {
-                "method": method,
-                "kreg": kreg,
-                "lamda": lamda,
-                "randomized": randomized,
-            }
-            return metadata
-    
-
     def optimize_thresholds(self, cal_scores: List, true_labels: List, alpha: float) -> Any:
         """
         Optimize thresholds using the correct FNR metric that matches validation.

@@ -316,7 +316,7 @@ class VectorOptimizer:
                 query_cache[f'{comp_key}_is_gt_only'] = False
                 query_cache[f'{comp_key}_max_scores'] = None
                 
-                # Check for pre-aggregated scores (from RAPS)
+                # Check for pre-aggregated scores
                 aggregated_key = f'{comp_key}_aggregated'
                 is_already_aggregated = aggregated_key in query_data
                 
