@@ -10,7 +10,7 @@ from models import (
     MODEL_DEPENDENCIES,
     NUMNODES_USAGE,
 )
-from conformal_prediction import ConformalRiskControl, conformal_prediction_parse_args, VectorConformalRiskControl
+from conformal_prediction import conformal_prediction_parse_args, VectorConformalRiskControl
 from utils import args2sequence, download_ckpt
 import logging
 
@@ -52,7 +52,6 @@ class ModelFactory:
         self.model.load_all_components(self.inf_args.load_path)
 
     def load_model(self):
-        logging.info(f"Loading model {self.model_to_infer} ")
         if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
             if self.model_to_infer.lower() == "multihoppredictor":
                 model_args_dict_path = os.path.join(
@@ -139,7 +138,7 @@ class ModelFactory:
             model: ModelUtils = getattr(models, self.inf_args.model_to_infer)(
                 self.model_args, num_relations, self.inf_args.device
             )
-        # Initialize conformal prediction
+        # Initialize conformal prediction (only for pipeline models)
         try:
             if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
                 # Create proper args for VectorConformalRiskControl
@@ -162,12 +161,8 @@ class ModelFactory:
                     model,  # Pass the actual model instance
                 )
             else:
-                model.conformal_prediction = ConformalRiskControl(
-                    self.model_args.conformal_prediction,
-                    model.generateCalibrateSamples,
-                    self.inf_args.model_to_infer.lower(),
-                    self.inf_args.device,
-                )
+                logging.info(f"Conformal prediction not supported for model {self.model_to_infer}. "
+                           "Only pipeline models (ThreeHopPipeline, TwoUnionPipeline, TwoIntersectProjectPipeline) are supported.")
         except ValueError as e:
             logging.info(f"Conformal Prediction Initialization Error: {e}. Continuing "
                          "without Conformal Prediction.")

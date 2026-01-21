@@ -19,7 +19,7 @@ import torch
 import logging
 from typing import List, Dict, Tuple, Optional
 from joblib import Parallel, delayed
-from .utils import binomial_upper_bound, min_empirical_fnr_for_feasibility, compute_fnr_metrics
+from .utils import binomial_upper_bound, compute_fnr_metrics
 import os
 
 # Configuration for different query types

@@ -210,5 +210,6 @@ __marimo__/
 # Conrad
 artifacts/databases/
 artifacts/snapshots/
+artifacts/inference_logs/
 queries/
 external/

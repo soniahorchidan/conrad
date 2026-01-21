@@ -9,7 +9,7 @@ from .model_config import ModelConfig
 from .data_manager import CalibrationDataManager
 from .calibration_manager import CalibrationManager
 from .vector_optimizer import VectorOptimizer
-from .utils import validate_model_name, compute_fnr_metrics
+from .utils import validate_model_name
 from utils import save_component
 
 
@@ -57,20 +57,9 @@ class VectorConformalRiskControl:
             num_entities = model.args.num_entities
         
         self.calibration_manager = CalibrationManager(model_name, num_entities=num_entities)
-        self.model_handler = self._setup_model_handler()
         
         # Cache configuration
         self._config_hash = self._generate_config_hash()
-
-    def _setup_model_handler(self) -> Any:
-        """Setup model-specific handler."""
-        dataset_class, get_x_fn, handler_class = ModelConfig.get_model_components(self.model_name)
-        
-        # Store these for later use
-        self.cali_dataset = dataset_class
-        self.get_x_fn = get_x_fn
-        
-        return handler_class(self.args, self.model_name, self.device)
 
     def _generate_config_hash(self) -> str:
         """
@@ -110,7 +99,6 @@ class VectorConformalRiskControl:
             self.data_manager.load_path = load_path
             self.data_manager.load_all_hop_data()
         
-        self.model_handler.load_all_components(load_path)
         logging.info("Conformal risk control components loaded")
 
     def prepare_data(self, save_path: str, db_controller: Any, 
@@ -152,19 +140,13 @@ class VectorConformalRiskControl:
 
     def train(self, save_path: str, db_controller: Any) -> None:
         """
-        Train the auxiliary model.
+        Train the auxiliary model (no-op since auxiliary models are not used).
         
         Args:
             save_path: Path to save model
             db_controller: Database controller
         """
-        logging.info("Training auxiliary model")
-        self.model_handler.train(
-            self.train_data,
-            self.val_data,
-            save_path,
-            db_controller,
-        )
+        logging.info("Auxiliary model training skipped - auxiliary models not used")
 
     def calibrate(self) -> Dict[str, Any]:
         """
@@ -409,5 +391,3 @@ class VectorConformalRiskControl:
             "true_labels",
             true_labels,
         )
-        
-        risk_control.model_handler.postprocess(risk_control.model_handler, general_args, args)

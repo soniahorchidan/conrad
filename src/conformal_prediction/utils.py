@@ -12,16 +12,12 @@ Architecture:
 Key functions:
 - compute_fnr_metrics: Unified metric computation (used by calibration and validation)
 - binomial_upper_bound: Statistical confidence bound for CRC
-- apply_vector_thresholds: DEPRECATED - use ThreeHopPipeline.apply_thresholds_to_scores()
-- compute_vector_fnr: DEPRECATED - use model's method + compute_fnr_metrics()
 
 All threshold comparisons use >= (not >) per conformal prediction theory.
 """
 import numpy as np
-import torch
 from typing import List, Dict, Any, Tuple, Optional, Union, Set
 from scipy.stats import beta
-from scipy.optimize import brentq
 import logging
 
 
@@ -111,24 +107,6 @@ def binomial_upper_bound(m: int, n: int, delta: float) -> float:
     if m == n:
         return 1.0
     return beta.ppf(1 - delta, m + 1, n - m)
-
-
-def min_empirical_fnr_for_feasibility(n: int, alpha: float, delta: float) -> float:
-    """
-    Return smallest empirical FNR that could satisfy U(m,n,δ) ≤ α.
-    
-    Args:
-        n: Number of samples
-        alpha: Target false negative rate
-        delta: Confidence level
-        
-    Returns:
-        Minimum empirical false negative rate
-    """
-    for m in range(n + 1):
-        if beta.ppf(1 - delta, m + 1, n - m) <= alpha:
-            return m / n
-    return 1.0  # even m=n not enough (shouldn't happen)
 
 
 def validate_model_name(model_name: str) -> None:
@@ -260,99 +238,3 @@ def compute_fnr_metrics(preds: List[Union[List[int], Set[int]]],
     # Return macro-averages (mean of per-query metrics)
     # This ensures the denominator is ALWAYS n_total queries
     return np.mean(fnrs), np.mean(precisions), np.mean(f1s)
-
-
-def extract_ground_truth_entities(true_labels: List[Dict[int, List[int]]], 
-                                 hops: Union[int, List[int]] = 3) -> List[Set[int]]:
-    """
-    Extract ground truth entities for each query from specified hop(s).
-    
-    Args:
-        true_labels: True labels for each query as dict {hop: [entity_ids]}
-        hops: Which hop(s) to extract. Can be:
-            - Single int (e.g., 3) to extract only that hop
-            - List of ints (e.g., [1, 2, 3]) to extract union of those hops
-            - Default is 3 (hop3 only, since predictions are hop3 only)
-        
-    Returns:
-        List of sets of ground truth entity IDs for each query
-    """
-    # Normalize hops to a list
-    if isinstance(hops, int):
-        hops_list = [hops]
-    else:
-        hops_list = list(hops)
-    
-    gt_entities_list = []
-    
-    for label_dict in true_labels:
-        gt_entities = set()
-        for hop in hops_list:
-            gt_entities.update(label_dict.get(hop, []))
-        gt_entities_list.append(gt_entities)
-    
-    return gt_entities_list
-
-
-def apply_vector_thresholds(scores: np.ndarray, thresholds: Union[List[float], np.ndarray], 
-                           mode: str = "hop3_only") -> List[List[int]]:
-    """
-    Apply thresholds to score tensor and extract predicted entities.
-    
-    DEPRECATED: Use ThreeHopPipeline.apply_thresholds_to_scores() instead.
-    This function is kept for backward compatibility but delegates to the model's method.
-    
-    Args:
-        scores: Score array of shape (n, k, d)
-        thresholds: Threshold values for each hop
-        mode: "hop3_only" (recommended) or "union" (deprecated)
-            
-    Returns:
-        List of predicted entity lists, one per query
-    """
-    logging.warning(
-        "apply_vector_thresholds is deprecated. "
-        "Use ThreeHopPipeline.apply_thresholds_to_scores() instead."
-    )
-    
-    # Delegate to the model's static method (single source of truth)
-    from models.topology.model import ThreeHopPipeline
-    return ThreeHopPipeline.apply_thresholds_to_scores(scores, thresholds)
-
-
-def compute_vector_fnr(scores: np.ndarray, thresholds: Union[List[float], np.ndarray],
-                      true_labels: List[Dict[int, List[int]]], mode: str = "hop3_only") -> float:
-    """
-    Compute FNR for vector thresholds on calibration data.
-    
-    DEPRECATED: This function is kept for backward compatibility.
-    Use ThreeHopPipeline.apply_thresholds_to_scores() + compute_fnr_metrics() instead.
-    
-    Args:
-        scores: Calibration scores of shape (n, k, d)
-        thresholds: Threshold values for each hop
-        true_labels: Ground truth labels as list of dicts {hop: [entity_ids]}
-        mode: Ignored (always uses hop3_only now)
-        
-    Returns:
-        Mean false negative rate across all queries
-    """
-    logging.warning(
-        "compute_vector_fnr is deprecated. "
-        "Use ThreeHopPipeline.apply_thresholds_to_scores() + compute_fnr_metrics() instead."
-    )
-    
-    # Delegate to the model's static method
-    from models.topology.model import ThreeHopPipeline
-    predictions = ThreeHopPipeline.apply_thresholds_to_scores(scores, thresholds, true_labels)
-    
-    # Extract ground truth (hop3 only - predictions are hop3 entities)
-    ground_truth = []
-    for label_dict in true_labels:
-        # Only use hop3 entities since predictions only contain hop3 entities
-        gt_entities = label_dict.get(3, [])
-        ground_truth.append(gt_entities)
-    
-    # Compute FNR using the unified metric
-    fnr, _, _ = compute_fnr_metrics(predictions, ground_truth)
-    return fnr
