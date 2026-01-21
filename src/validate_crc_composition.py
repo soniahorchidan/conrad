@@ -59,12 +59,12 @@ class BenchmarkConfig:
     #   - TwoUnionPipeline: 2 values [branch1, branch2]
     #   - TwoIntersectProjectPipeline: 3 values [branch1, branch2, projection]
     HARDCODED_LAMBDAS = {
-        0.1: np.array([0.45997125, 0.33456467, 0.49807526]),
-        0.2: np.array([0.49873283, 0.47114053, 0.49899892]),
-        0.30000000000000004: np.array([0.49899965, 0.49857954, 0.83243769]),
-        0.4: np.array([0.49899998, 0.49898610, 0.89048301]),
-        0.5: np.array([0.85828837, 0.49899947, 0.90382489]),
-        0.6: np.array([0.88775180, 0.49900004, 0.91460263]),
+        0.1: np.array([0.10637182, 0.10596487, 0.02304559]),
+        0.2: np.array([0.24025345, 0.20241942, 0.11495317]),
+        0.30000000000000004: np.array([0.46472685, 0.33382118, 0.17628885]),
+        0.4: np.array([0.49898293, 0.46700063, 0.24832706]),
+        0.5: np.array([0.49899857, 0.49892852, 0.36985701]),
+        0.6: np.array([0.49899989, 0.49899983, 0.48735114]),
     }
     
     def __post_init__(self):
@@ -72,7 +72,6 @@ class BenchmarkConfig:
         # Get repo root (assuming script is in src/, go up one level)
         if self.dataset:
             # Normalize dataset name for folder (remove hyphens)
-            # e.g., "fb15k-237" -> "fb15k237", "nell-955" -> "nell955"
             dataset_normalized = self.dataset.replace("-", "")
             
             # Get repo root: go up from src/ to repo root
@@ -602,7 +601,7 @@ def main():
     inf_args = merge_args(
         parse_args_inference,
         "args_file",
-        ["core", "vectordb", "inference_engine", "dropbox"],
+        ["core", "inference_engine"],
         command_line_args=remaining_args,
     )
     

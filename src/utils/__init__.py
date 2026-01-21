@@ -5,7 +5,6 @@ from .utilities import (
     args2sequence,
     set_global_seed,
     save_component,
-    set_remote_urls,
     set_logger,
     log_metrics,
     override_config,
@@ -18,7 +17,5 @@ from .utilities import (
     calc_metrics_batch,
     count_frequency,
     merge_args,
-    download_ckpt,
     get_graph,
-    download_pretrained_model,
 )

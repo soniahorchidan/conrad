@@ -24,10 +24,10 @@ do
 done < "$env_file"
 
 get_orb_config() {
-    # read priority: input parameter -> ./orb_config.json.local -> ./config/orb_config.json
+    # read priority: input parameter -> ./orb_config.json.local -> ./config/config.json
     local config_path="${1:-./orb_config.json.local}"
     if [ ! -f "$config_path" ]; then
-        config_path="config/orb_config.json"
+        config_path="config/config.json"
     fi
     if [ ! -f "$config_path" ]; then
         echo "Error: Config file not found at $config_path"
@@ -229,7 +229,7 @@ Setup Neo4j if not using Docker:
 Install Python dependencies:
 > $0 install_deps cpu|cuda
 
-Imports dataset (Note: The dataset name is specified in the config file (orb_config.json), overwrites existing data):
+Imports dataset (Note: The dataset name is specified in the config file (config.json), overwrites existing data):
 (Specify --without-docker to use Neo4j orb_dependency instance)
 > $0 neo4j import [--without-docker]
 

@@ -1299,7 +1299,7 @@ class BaselineRunner:
             inf_args = merge_args(
                 parse_args_inference,
                 "args_file",
-                ["core", "vectordb", "inference_engine", "dropbox"],
+                ["core", "inference_engine"],
                 ["--args_file", args_file]
             )
             

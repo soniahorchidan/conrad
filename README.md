@@ -47,7 +47,7 @@ cd src
 Or run individual benchmarks:
 
 ```bash
-python run_crc_benchmark_auto.py --confidence-levels 0.5 0.6 0.7 --args_file ../config/orb_config.json --model_to_infer ThreeHopPipeline --dataset fb15k-237
+python run_crc_benchmark_auto.py --confidence-levels 0.5 0.6 0.7 --args_file ../config/config.json --model_to_infer ThreeHopPipeline --dataset fb15k-237
 ```
 
 ## Directory Structure
@@ -60,7 +60,7 @@ conrad/
 │   ├── install_neo4j.sh
 │   └── change_neo4j_db_path.sh
 ├── config/
-│   └── orb_config.json        # Configuration file
+│   └── config.json        # Configuration file
 ├── benchmark/
 │   └── scripts/
 │       ├── generate_calibration.sh

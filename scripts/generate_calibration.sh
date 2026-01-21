@@ -15,32 +15,28 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_SCRIPT="${REPO_ROOT}/build.sh"
 
 # Parse command line arguments
-CONFIG_FILE="${REPO_ROOT}/config/orb_config.json"
-DATASET_OVERRIDE=""
+DATASET=""
 DELETE_EDGES_PERC=""
+CONFIG_FILE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --config)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
         --dataset)
-            DATASET_OVERRIDE="$2"
+            DATASET="$2"
             shift 2
             ;;
         --delete-edges-perc)
             DELETE_EDGES_PERC="$2"
             shift 2
             ;;
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
         *)
-            # Legacy support: first positional arg is config file
-            if [ -z "${CONFIG_FILE_SET:-}" ]; then
-                CONFIG_FILE="$1"
-                CONFIG_FILE_SET=1
-            fi
-            shift
+            log ERROR "Unknown argument: $1"
+            exit 1
             ;;
     esac
 done
@@ -48,10 +44,26 @@ done
 # Validate mandatory arguments
 if [ -z "${DELETE_EDGES_PERC}" ]; then
     log ERROR "Missing required argument: --delete-edges-perc"
-    log ERROR "Usage: $0 --delete-edges-perc <percentage> [--dataset <dataset>] [--config <config_file>]"
+    log ERROR "Usage: $0 --delete-edges-perc <percentage> --dataset <dataset> [--config <config_file>]"
     log ERROR "Supported datasets: fb15k-237, nell-955"
     exit 1
 fi
+
+if [ -z "${DATASET}" ]; then
+    log ERROR "Missing required argument: --dataset"
+    log ERROR "Usage: $0 --delete-edges-perc <percentage> --dataset <dataset> [--config <config_file>]"
+    log ERROR "Supported datasets: fb15k-237, nell-955"
+    exit 1
+fi
+
+# Validate dataset name
+if [ "${DATASET}" != "fb15k-237" ] && [ "${DATASET}" != "nell-955" ]; then
+    log ERROR "Unsupported dataset: ${DATASET}"
+    log ERROR "Supported datasets: fb15k-237, nell-955"
+    exit 1
+fi
+
+log INFO "Using dataset: ${DATASET}"
 
 NEO4J_USER="${NEO4J_USER:-neo4j}"
 NEO4J_PASSWORD="${NEO4J_PASSWORD:-password123}"
@@ -59,52 +71,17 @@ NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 CYPHER_SHELL_BASE=(cypher-shell -u "${NEO4J_USER}" -p "${NEO4J_PASSWORD}" -d "${NEO4J_DB}")
 
-# Validate and set dataset name
-if [ -n "${DATASET_OVERRIDE}" ]; then
-    DATASET="${DATASET_OVERRIDE}"
-    # Validate dataset name
-    if [ "${DATASET}" != "fb15k-237" ] && [ "${DATASET}" != "nell-955" ]; then
-        log ERROR "Unsupported dataset: ${DATASET}"
-        log ERROR "Supported datasets: fb15k-237, nell-955"
-        exit 1
-    fi
-    log INFO "Using dataset from command line: ${DATASET}"
-    
-    # Update config file with the dataset
-    if [ -f "${CONFIG_FILE}" ]; then
-        # Create a temporary config with updated dataset
-        TMP_CONFIG=$(mktemp)
-        jq ".core.dataset = \"${DATASET}\"" "${CONFIG_FILE}" > "${TMP_CONFIG}"
-        # Also update kuzu database path if it exists
-        if jq -e '.core.kuzu_database_path' "${CONFIG_FILE}" > /dev/null 2>&1; then
-            KUZU_PATH="./artifacts/databases/${DATASET}-kuzu"
-            jq ".core.kuzu_database_path = \"${KUZU_PATH}\"" "${TMP_CONFIG}" > "${TMP_CONFIG}.tmp" && mv "${TMP_CONFIG}.tmp" "${TMP_CONFIG}"
-        fi
-        CONFIG_FILE="${TMP_CONFIG}"
-        log INFO "Updated config with dataset: ${DATASET}"
-    fi
-else
-    # Read dataset name from config file
-    if [ ! -f "${CONFIG_FILE}" ]; then
-        log ERROR "Config file not found: ${CONFIG_FILE}"
-        exit 1
-    fi
-    
-    DATASET=$(jq -r '.core.dataset' "${CONFIG_FILE}")
-    if [ -z "${DATASET}" ] || [ "${DATASET}" = "null" ]; then
-        log ERROR "Dataset not found in config file: ${CONFIG_FILE}"
-        exit 1
-    fi
-    
-    # Validate dataset name
-    if [ "${DATASET}" != "fb15k-237" ] && [ "${DATASET}" != "nell-955" ]; then
-        log ERROR "Unsupported dataset in config: ${DATASET}"
-        log ERROR "Supported datasets: fb15k-237, nell-955"
-        exit 1
-    fi
-    
-    log INFO "Using dataset: ${DATASET} from config: ${CONFIG_FILE}"
-fi
+# Create temporary config file for Neo4j import (build.sh needs it)
+TMP_CONFIG=$(mktemp)
+cat > "${TMP_CONFIG}" <<EOF
+{
+  "core": {
+    "dataset": "${DATASET}"
+  }
+}
+EOF
+CONFIG_FILE="${TMP_CONFIG}"
+log INFO "Created temporary config file for Neo4j import"
 
 # Normalize dataset name for folder names (remove hyphens)
 # e.g., "fb15k-237" -> "fb15k237", "nell-955" -> "nell955"

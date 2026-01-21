@@ -11,7 +11,7 @@ from models import (
     NUMNODES_USAGE,
 )
 from conformal_prediction import conformal_prediction_parse_args, VectorConformalRiskControl
-from utils import args2sequence, download_ckpt
+from utils import args2sequence
 import logging
 
 
@@ -33,20 +33,10 @@ class ModelFactory:
         Prepare the model for logging.
         """
         logging.info(f"Preparing model {self.model_to_infer} for inference")
-
-        if self.inf_args.remote_ckpt_url is not None:
-            logging.info(
-                f"Downloading {self.model_to_infer} checkpoints from DropBox..."
-            )
-            self.inf_args.load_path = download_ckpt(
-                self.inf_args.dataset,
-                self.inf_args.remote_ckpt_url,
-                self.inf_args.remote_ckpt_save_path,
-                self.model_to_infer.lower(),
-                self.inf_args.app_key,
-                self.inf_args.app_secret,
-                self.inf_args.refresh_token,
-            )
+        
+        # Models are expected to be already present in artifacts/snapshots
+        if self.inf_args.load_path is None:
+            raise ValueError(f"load_path must be specified. Models should be present in artifacts/snapshots")
 
         self.model = self.load_model()
         self.model.load_all_components(self.inf_args.load_path)

@@ -9,9 +9,6 @@ import requests
 import hashlib
 from argparse import Namespace
 from typing import List
-import dropbox
-import urllib.request
-from dateutil import parser
 from torch_scatter import scatter_add
 from torch_geometric.data import Data
 
@@ -74,43 +71,27 @@ def args2sequence(args: dict) -> List[str]:
 
 def merge_args(parse_args, json_args_name, json_keys, command_line_args=None):
     """
-    Read the arguments from the JSON file and merge them with the command line arguments.
-    Command line arguments have higher priority.
+    Parse command-line arguments, auto-detect device, and convert relative paths to absolute.
+    Note: json_args_name and json_keys parameters are kept for API compatibility but config files are no longer used.
     """
 
     args = parse_args(command_line_args)
+    
+    # Auto-detect device if not specified
     if args.device is None:
         if torch.backends.mps.is_available():
             args.device = "mps"
         else:
             args.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load the arguments from the JSON file
-    if args.__dict__[json_args_name] is not None:
-        with open(args.__dict__[json_args_name], "r") as f:
-            json_dict = json.load(f)
-
-        args_list = []
-        for key in json_keys:
-            args_list += args2sequence(json_dict[key])
-
-        args = vars(args)
-        json_args = parse_args(args_list)
-        json_args = vars(json_args)
-
-        # command line arguments override the JSON file arguments
-        for key in args:
-            if args[key] is not None:
-                json_args[key] = args[key]
-
-        # convert the paths to absolute paths if they are relative
-        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        for key in json_args:
-            if key.endswith("_path") and json_args[key] is not None:
-                json_args[key] = os.path.abspath(
-                    os.path.join(str(root_dir), json_args[key])
-                )
-        args = Namespace(**json_args)
+    
+    # Convert relative paths to absolute paths
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    args_dict = vars(args)
+    for key in args_dict:
+        if key.endswith("_path") and args_dict[key] is not None and not os.path.isabs(args_dict[key]):
+            args_dict[key] = os.path.abspath(os.path.join(str(root_dir), args_dict[key]))
+    args = Namespace(**args_dict)
+    
     return args
 
 
@@ -127,106 +108,6 @@ def save_component(save_path: str, model_name: str, component_name: str, compone
     torch.save(component, os.path.join(save_path, model_name, component_name + ".pth"))
 
 
-def calculate_dropbox_content_hash(file_path):
-    """Calculate the Dropbox content hash of a local file."""
-    BLOCK_SIZE = 4 * 1024 * 1024  # 4MB
-    hasher = hashlib.sha256()
-
-    with open(file_path, "rb") as f:
-        while chunk := f.read(BLOCK_SIZE):
-            chunk_hash = hashlib.sha256(chunk).digest()
-            hasher.update(chunk_hash)
-
-    return hasher.hexdigest()
-
-
-def download_pretrained_model(url, save_path, save_name):
-    os.makedirs(save_path, exist_ok=True)
-
-    save_name = os.path.join(save_path, save_name)
-    with urllib.request.urlopen(url) as response, open(save_name, "wb") as out_file:
-        data = response.read()  # Read the content of the response
-        out_file.write(data)  # Write the content to the file
-
-    return save_name
-
-
-def download_ckpt(
-    dataset, url, save_path, model_name, app_key, app_secret, refresh_token
-):
-    os.makedirs(save_path, exist_ok=True)
-
-    shared_link = dropbox.files.SharedLink(url=url)
-    dbx = dropbox.Dropbox(
-        app_key=app_key, app_secret=app_secret, oauth2_refresh_token=refresh_token
-    )
-    dbx.check_and_refresh_access_token()
-
-    # Get the list of snapshots
-    snapshots = []
-    logging.info(f"Getting snapshots list from {url}")
-    result = dbx.files_list_folder(path=f"/{dataset}", shared_link=shared_link)
-    for entry in result.entries:
-        # only retrieve folders
-        if isinstance(entry, dropbox.files.FolderMetadata):
-            snapshots.append(entry.name)
-
-    # Sort the snapshots by date
-    snapshots_map = {snapshot: parser.parse(snapshot) for snapshot in snapshots}
-    snapshots = sorted(snapshots_map, key=snapshots_map.get, reverse=True)
-
-    # iterate through snapshots to find the latest snapshot for each model
-    ckpt_entry = None
-    ckpt_date_str = None
-    for snapshot in snapshots:
-        result = dbx.files_list_folder(path=f"/{dataset}/{snapshot}", shared_link=shared_link)
-        for entry in result.entries:
-            if not isinstance(entry, dropbox.files.FileMetadata):
-                continue
-            if entry.name != f"{model_name}.zip":
-                continue
-            ckpt_entry = entry
-            ckpt_date_str = snapshot
-            break
-        if ckpt_entry is not None:
-            break
-    assert ckpt_entry is not None, f"No snapshot found in {url}"
-
-    # Download the latest snapshot
-    file_name = f"{ckpt_date_str}_{entry.name}"
-    file_path = os.path.join(save_path, file_name)
-    downloaded = False
-    if os.path.exists(file_path):
-        logging.info(f"{file_name} already exists in {save_path}")
-        if calculate_dropbox_content_hash(file_path) == ckpt_entry.content_hash:
-            logging.info(f"Content hash of {file_name} is correct.")
-            downloaded = True
-        else:
-            logging.info(f"Content hash of {file_name} is incorrect.")
-    if not downloaded:
-        logging.info(f"Downloading {file_name} from Dropbox...")
-        dbx.files_download_to_file(file_path, entry.path_lower)
-
-    # Extract the snapshot
-    os.system(f"unzip -q -o {file_path} -d {save_path}")
-    if os.path.exists(os.path.join(save_path, "__MACOSX")):
-        os.system(f"rm -rf {os.path.join(save_path, '__MACOSX')}")
-    snapshot_path = file_path.replace(".zip", "")
-    # assume the unzipped folder is the model name
-    os.system(f"rm -rf {snapshot_path}")
-    os.system(f"mv {os.path.join(save_path, model_name)} {snapshot_path}")
-    return snapshot_path
-
-
-def set_remote_urls(args, kwargs, key):
-    if hasattr(args, "model_to_infer"):
-        attr_name = getattr(args, "model_to_infer")
-        if hasattr(args, attr_name):
-            attr = getattr(args, attr_name)
-            if key in attr:
-                kwargs["remote_url"] = attr[key]
-
-    return kwargs
 
 
 def set_logger(log_path, file_name, print_on_screen):
