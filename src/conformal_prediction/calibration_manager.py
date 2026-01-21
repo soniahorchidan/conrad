@@ -145,7 +145,6 @@ class CalibrationManager:
                     cal_scores, true_labels, query_type=query_type, 
                     num_entities=self.num_entities
                 )
-                optimizer.print_score_distributions()
                 precalibrated_thresholds = optimizer.optimize_thresholds_batch(alphas)
                 logging.info(f"Batch calibration for alphas {alphas} done!")
                 return precalibrated_thresholds

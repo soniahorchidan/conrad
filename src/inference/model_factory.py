@@ -78,9 +78,7 @@ class ModelFactory:
                 )
 
 
-        # Initialize database controller - only Neo4j supported
-        if self.inf_args.db_backend != "neo4j":
-            raise ValueError(f"Only Neo4j backend is supported. Got: {self.inf_args.db_backend}")
+        # Initialize Neo4j database controller
         self.model_args.db_controller = Neo4JBackendDBController(
             f"neo4j://{self.inf_args.neo4j_host}:{self.inf_args.neo4j_bolt_port}",
             self.inf_args.node_unique_id,

@@ -5,6 +5,7 @@ import sys
 import re
 import pickle
 import time
+import json
 from typing import Dict, List, Tuple, Any, Optional
 from dataclasses import dataclass
 
@@ -42,7 +43,7 @@ class BenchmarkConfig:
     
     max_calibration_queries: int = 100  # Limit calibration queries for testing
     max_gt_size: int = 1000  # Skip queries with >1000 GT hop3 entities (must match calibration filter!)
-    use_hardcoded_lambdas: bool = False  # Use hardcoded lambda values instead of calibration
+    lambdas_file_path: str = None  # Path to JSON file containing pre-calibrated lambdas (if provided, skips calibration)
     
     # Model to query type mapping
     MODEL_TO_QUERY_TYPE = {
@@ -51,21 +52,42 @@ class BenchmarkConfig:
         "twointersectprojectpipeline": "2ip_pipeline",
     }
     
-    # TODO(sonia): come up with a more elegant solution for this
-    # Hardcoded lambda hat values from most recent calibration run
-    # These will be automatically updated by run_crc_benchmark_auto.py
-    # NOTE: The number of values depends on the pipeline type:
-    #   - ThreeHopPipeline: 3 values [hop1, hop2, hop3]
-    #   - TwoUnionPipeline: 2 values [branch1, branch2]
-    #   - TwoIntersectProjectPipeline: 3 values [branch1, branch2, projection]
-    HARDCODED_LAMBDAS = {
-        0.1: np.array([0.10637182, 0.10596487, 0.02304559]),
-        0.2: np.array([0.24025345, 0.20241942, 0.11495317]),
-        0.30000000000000004: np.array([0.46472685, 0.33382118, 0.17628885]),
-        0.4: np.array([0.49898293, 0.46700063, 0.24832706]),
-        0.5: np.array([0.49899857, 0.49892852, 0.36985701]),
-        0.6: np.array([0.49899989, 0.49899983, 0.48735114]),
-    }
+    def load_lambdas_from_file(self) -> Dict[float, np.ndarray]:
+        """
+        Load lambda values from JSON file.
+        
+        Returns:
+            Dictionary mapping confidence levels (float) to numpy arrays of lambda values.
+            NOTE: The number of values depends on the pipeline type:
+              - ThreeHopPipeline: 3 values [hop1, hop2, hop3]
+              - TwoUnionPipeline: 2 values [branch1, branch2]
+              - TwoIntersectProjectPipeline: 3 values [branch1, branch2, projection]
+        
+        Raises:
+            ValueError: If lambda file is not found or cannot be loaded.
+        """
+        if not self.lambdas_file_path:
+            raise ValueError("lambdas_file_path must be set to load lambdas from file")
+        
+        if not os.path.exists(self.lambdas_file_path):
+            raise ValueError(f"Lambda file not found: {self.lambdas_file_path}")
+        
+        try:
+            with open(self.lambdas_file_path, 'r') as f:
+                lambdas_dict = json.load(f)
+            
+            # Convert string keys back to floats and lists to numpy arrays
+            result = {}
+            for key, value in lambdas_dict.items():
+                alpha = float(key)
+                result[alpha] = np.array(value)
+            
+            logging.info(f"Loaded lambdas from {self.lambdas_file_path} for {len(result)} confidence levels")
+            return result
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse JSON from lambda file {self.lambdas_file_path}: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to load lambdas from {self.lambdas_file_path}: {e}")
     
     def __post_init__(self):
         """Construct derived paths after initialization."""
@@ -129,17 +151,24 @@ class CRCBenchmarkValidator:
             inf_args.relation_unique_id,
         )
         
-        if self.config.use_hardcoded_lambdas:
-            logging.info("Using hardcoded lambda values (skipping calibration)")
-            # Set the metadata on the conformal prediction object
-            metadata_calibrate = {
-                'calibrated_alphas': self.config.HARDCODED_LAMBDAS,
-                'vector_scores': True,
-                'num_hops': 3,
-                'note': 'Using pre-calibrated lambda values from previous calibration run'
-            }
-            model_factory_pipeline.model.conformal_prediction.metadata = metadata_calibrate
-            logging.info(f"Pre-calibrated lambdas loaded: {metadata_calibrate}")
+        if self.config.lambdas_file_path:
+            logging.info("Using pre-calibrated lambda values from file (skipping calibration)")
+            try:
+                lambdas_dict = self.config.load_lambdas_from_file()
+                logging.info(f"Loaded lambdas for {len(lambdas_dict)} confidence levels")
+                
+                # Set the metadata on the conformal prediction object
+                metadata_calibrate = {
+                    'calibrated_alphas': lambdas_dict,
+                    'vector_scores': True,
+                    'num_hops': 3,
+                    'note': f'Using pre-calibrated lambda values from {self.config.lambdas_file_path}'
+                }
+                model_factory_pipeline.model.conformal_prediction.metadata = metadata_calibrate
+                logging.info(f"Pre-calibrated lambdas loaded: {metadata_calibrate}")
+            except Exception as e:
+                logging.error(f"Failed to load lambdas from file: {e}")
+                raise
         else:
             metadata_calibrate = model_factory_pipeline.model.conformal_prediction.prepare_calibrate(
                 inf_args.load_path,
@@ -575,7 +604,8 @@ def main():
         "--max-eval-queries", type=int, default=10000, help="Maximum number of test/evaluation queries to process (only used in benchmark/both modes)"
     )
     parser_validate_crc.add_argument(
-        "--use-hardcoded-lambdas", action="store_true", help="Use hardcoded lambda values from previous calibration run instead of recalibrating"
+        "--lambdas-file", type=str, default=None,
+        help="Path to JSON file containing pre-calibrated lambda values (if provided, skips calibration and uses these values)"
     )
     parser_validate_crc.add_argument(
         "--dataset", type=str, default=None, 
@@ -640,15 +670,17 @@ def main():
     logging.info(f"Query type: {BenchmarkConfig.MODEL_TO_QUERY_TYPE[model_name]}")
     if args_validate_crc.mode in ["calibration", "both"]:
         logging.info(f"Maximum calibration queries: {args_validate_crc.max_calibration_queries}")
-    if args_validate_crc.use_hardcoded_lambdas:
-        logging.info("Using pre-calibrated lambda values from previous calibration run")
+    if args_validate_crc.lambdas_file:
+        logging.info(f"Using pre-calibrated lambda values from: {args_validate_crc.lambdas_file}")
+    else:
+        logging.info("No lambda file provided, will run calibration")
 
     # Initialize benchmark validator with model-specific config
     config = BenchmarkConfig(
         confidence=args_validate_crc.confidence,
         max_calibration_queries=args_validate_crc.max_calibration_queries,
         max_queries_per_file=args_validate_crc.max_eval_queries,
-        use_hardcoded_lambdas=args_validate_crc.use_hardcoded_lambdas,
+        lambdas_file_path=args_validate_crc.lambdas_file,
         query_type=BenchmarkConfig.MODEL_TO_QUERY_TYPE[model_name],
         dataset=args_validate_crc.dataset
     )

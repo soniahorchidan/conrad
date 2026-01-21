@@ -19,7 +19,7 @@ import torch
 import logging
 from typing import List, Dict, Tuple, Optional
 from joblib import Parallel, delayed
-from .utils import binomial_upper_bound, compute_fnr_metrics
+from .utils import compute_fnr_metrics
 import os
 
 # Configuration for different query types
@@ -160,89 +160,6 @@ class VectorOptimizer:
         else:
             raise ValueError(f"No default pipeline model for query type '{self.query_type}'")
     
-    def print_score_distributions(self):
-        """
-        Print the distribution of scores in the calibration data dictionaries.
-        Shows statistics for all components (hops/branches).
-        Uses MAX aggregation for components with paths.
-        """
-        component_scores_lists = {key: [] for key in self.component_keys}
-        component_path_counts = {key: 0 for key in self.component_keys}
-        
-        for query_data in self.cal_scores:
-            for comp_key in self.component_keys:
-                comp_data = query_data[comp_key]
-                
-                # Handle different data structures
-                if isinstance(comp_data, dict) and 'scores' in comp_data:
-                    # Single score vector (e.g., first hop or branch)
-                    scores = comp_data['scores']
-                    dense = self.pipeline_model._scores_to_dense_vector(scores, num_entities=self.num_entities)
-                    component_scores_lists[comp_key].append(dense)
-                    component_path_counts[comp_key] += 1
-                    
-                elif isinstance(comp_data, list):
-                    # Multiple paths (e.g., hop2, hop3) - MAX aggregate
-                    score_vectors = []
-                    for path_data in comp_data:
-                        if isinstance(path_data, dict) and 'scores' in path_data:
-                            scores = path_data['scores']
-                            dense = self.pipeline_model._scores_to_dense_vector(scores, num_entities=self.num_entities)
-                            score_vectors.append(dense)
-                            component_path_counts[comp_key] += 1
-                    
-                    if score_vectors:
-                        max_aggregated = np.maximum.reduce(score_vectors)
-                        component_scores_lists[comp_key].append(max_aggregated)
-        
-        # Stack and flatten scores
-        component_scores_flat = {}
-        for comp_key in self.component_keys:
-            scores_list = component_scores_lists[comp_key]
-            if scores_list:
-                stacked = np.stack(scores_list)
-                component_scores_flat[comp_key] = stacked.flatten()
-            else:
-                component_scores_flat[comp_key] = np.array([])
-        
-        # Print distributions
-        logging.info("=" * 80)
-        logging.info("SCORE DISTRIBUTIONS IN CALIBRATION DATA (MAX Aggregated)")
-        logging.info("=" * 80)
-        logging.info(f"Total queries: {self.n}")
-        logging.info(f"Total entities per query: 14,541")
-        logging.info(f"Component type: {self.component_type}")
-        
-        for idx, comp_key in enumerate(self.component_keys, start=1):
-            scores_array = component_scores_flat[comp_key]
-            path_count = component_path_counts[comp_key]
-            
-            if len(scores_array) == 0:
-                logging.info(f"\n{comp_key}: No scores found")
-                continue
-            
-            # Only count non-zero scores for statistics
-            nonzero_scores = scores_array[scores_array > 0]
-            
-            logging.info(f"{comp_key} Score Distribution (MAX Aggregated):")
-            logging.info(f"  Total score entries: {len(scores_array):,} ({self.n} queries × 14,541 entities)")
-            logging.info(f"  Non-zero scores: {len(nonzero_scores):,}")
-            logging.info(f"  Zero scores: {len(scores_array) - len(nonzero_scores):,}")
-            logging.info(f"  Path count: {path_count}")
-            
-            if len(nonzero_scores) > 0:
-                logging.info(f"  Min: {nonzero_scores.min():.6f}")
-                logging.info(f"  Max: {nonzero_scores.max():.6f}")
-                logging.info(f"  Mean: {nonzero_scores.mean():.6f}")
-                logging.info(f"  Median: {np.median(nonzero_scores):.6f}")
-                logging.info(f"  Std: {nonzero_scores.std():.6f}")
-                logging.info(f"  25th percentile: {np.percentile(nonzero_scores, 25):.6f}")
-                logging.info(f"  75th percentile: {np.percentile(nonzero_scores, 75):.6f}")
-                logging.info(f"  90th percentile: {np.percentile(nonzero_scores, 90):.6f}")
-                logging.info(f"  95th percentile: {np.percentile(nonzero_scores, 95):.6f}")
-                logging.info(f"  99th percentile: {np.percentile(nonzero_scores, 99):.6f}")
-        
-        logging.info("=" * 80)
 
     def _precompute_dense_vectors(self):
         """
@@ -686,24 +603,6 @@ class VectorOptimizer:
             all_scores.extend(nonzero_scores.tolist())
         
         return np.array(all_scores) if all_scores else np.array([])
-
-    def _evaluate_thresholds(self, thresholds: np.ndarray, alpha: float, delta: float) -> Tuple[bool, float, float]:
-        """
-        Evaluate a single threshold configuration.
-        
-        Args:
-            thresholds: Threshold values
-            alpha: Target false negative rate
-            delta: Confidence level
-            
-        Returns:
-            Tuple of (is_feasible, empirical_fnr, upper_bound)
-        """
-        fnr = self._compute_fnr_for_thresholds(thresholds)
-        m = int(round(fnr * self.n))
-        ucb = binomial_upper_bound(m, self.n, delta)
-        
-        return ucb <= alpha, fnr, ucb
 
     def optimize_thresholds(self, alpha: float = 0.1, delta: float = 0.05, num_levels: int = 25, chain_type: str = "balanced") -> np.ndarray:
         logging.error("optimize_thresholds is not implemented")

@@ -106,48 +106,6 @@ def extract_calibrated_lambdas(log_path: str) -> Dict[float, List[float]]:
         raise ValueError("Could not extract calibrated lambdas from log. Please check the calibration log.")
 
 
-def update_hardcoded_lambdas(script_path: str, lambdas_dict: Dict[float, List[float]]) -> None:
-    """Update HARDCODED_LAMBDAS in validate_crc_composition.py"""
-    print(f"\nUpdating HARDCODED_LAMBDAS in {script_path}...")
-    
-    with open(script_path, 'r') as f:
-        lines = f.readlines()
-    
-    # Find the HARDCODED_LAMBDAS dictionary (around line 55)
-    start_idx = None
-    end_idx = None
-    
-    for i, line in enumerate(lines):
-        if 'HARDCODED_LAMBDAS = {' in line:
-            start_idx = i
-        if start_idx is not None and '}' in line and i > start_idx:
-            end_idx = i
-            break
-    
-    if start_idx is None or end_idx is None:
-        raise ValueError("Could not find HARDCODED_LAMBDAS dictionary in script")
-    
-    # Build new dictionary string
-    new_dict_lines = ["    HARDCODED_LAMBDAS = {\n"]
-    for alpha in sorted(lambdas_dict.keys()):
-        values = lambdas_dict[alpha]
-        values_str = ', '.join([f"{v:.8f}" for v in values])
-        new_dict_lines.append(f"        {alpha}: np.array([{values_str}]),\n")
-    new_dict_lines.append("    }\n")
-    
-    # Replace old dictionary with new one
-    new_lines = lines[:start_idx] + new_dict_lines + lines[end_idx+1:]
-    
-    # Write back to file
-    with open(script_path, 'w') as f:
-        f.writelines(new_lines)
-    
-    print("HARDCODED_LAMBDAS updated successfully!")
-    print("New values:")
-    for alpha, values in sorted(lambdas_dict.items()):
-        print(f"  {alpha}: {values}")
-
-
 def run_benchmark_sweep(confidence_levels: List[float], output_dir: str, 
                        max_calibration_queries: int = 1600,
                        max_eval_queries: int = 1000,
@@ -159,7 +117,7 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
     
     Args:
         extra_args: Additional arguments to pass through to validate_crc_composition.py
-        skip_calibration: If True, skip calibration and use existing HARDCODED_LAMBDAS
+        skip_calibration: If True, skip calibration and use existing lambda file from output directory
     
     Returns:
         Path to results CSV file
@@ -211,28 +169,32 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
             json_dict = {str(k): v for k, v in lambdas_dict.items()}
             json.dump(json_dict, f, indent=2)
         print(f"Lambdas saved to: {lambdas_json_path}")
-        
-        # Step 3: Update script with new lambdas
-        print("\n" + "="*80)
-        print("STEP 3: UPDATING HARDCODED LAMBDAS IN SCRIPT")
-        print("="*80)
-        
-        script_path = "validate_crc_composition.py"
-        try:
-            update_hardcoded_lambdas(script_path, lambdas_dict)
-        except Exception as e:
-            print(f"ERROR: {e}")
-            sys.exit(1)
     else:
         print("="*80)
-        print("SKIPPING CALIBRATION - Using existing HARDCODED_LAMBDAS")
+        print("SKIPPING CALIBRATION - Using existing lambda file")
         print("="*80)
         print()
+        # Try to find existing lambda file in output directory
+        lambdas_json_path = os.path.join(output_dir, "calibrated_lambdas.json")
+        if not os.path.exists(lambdas_json_path):
+            print(f"ERROR: Lambda file not found at {lambdas_json_path}")
+            print("Please provide a valid lambda file or run calibration first.")
+            sys.exit(1)
+        print(f"Using existing lambda file: {lambdas_json_path}")
     
-    # Step 4: Run benchmarks for each confidence level
+    # Step 3: Run benchmarks for each confidence level
     print("\n" + "="*80)
-    print("STEP 4: RUNNING BENCHMARK QUERIES")
+    print("STEP 3: RUNNING BENCHMARK QUERIES")
     print("="*80)
+    
+    # Ensure we have a lambda file path
+    if not skip_calibration:
+        # lambdas_json_path was set above
+        pass
+    else:
+        # lambdas_json_path should have been set in the else block above
+        if 'lambdas_json_path' not in locals():
+            lambdas_json_path = os.path.join(output_dir, "calibrated_lambdas.json")
     
     results_csv = os.path.join(output_dir, "results_summary.csv")
     
@@ -249,7 +211,7 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
             "python", "validate_crc_composition.py",
             "--mode", "benchmark",
             "--confidence", str(conf),
-            "--use-hardcoded-lambdas",
+            "--lambdas-file", lambdas_json_path,
             "--max-eval-queries", str(max_eval_queries)
         ] + extra_args
         
@@ -315,7 +277,7 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
         else:
             print(f"WARNING: Could not extract results from benchmark log")
     
-    # Step 5: Display summary
+    # Step 4: Display summary
     print("\n" + "="*80)
     print("BENCHMARK SWEEP COMPLETED")
     print("="*80)
@@ -340,7 +302,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default=None,
                        help="Output directory (default: crc_benchmark_results_TIMESTAMP)")
     parser.add_argument("--skip-calibration", action="store_true",
-                       help="Skip calibration step and use existing HARDCODED_LAMBDAS")
+                       help="Skip calibration step and use existing lambda file from output directory")
     parser.add_argument("--max-eval-queries", type=int, default=1000,
                        help="Maximum number of test queries to evaluate (default: 1000)")
     parser.add_argument("--dataset", type=str, default=None,

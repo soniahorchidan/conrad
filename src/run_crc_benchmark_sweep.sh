@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --help                               Show this help message"
             echo ""
             echo "Example:"
-            echo "  $0 --confidence-levels \"0.5 0.6 0.7 0.8\" --max-calibration-queries 1000"
+            echo "  $0 --confidence-levels \"0.5 0.6 0.7 0.8\" --max-calibration-queries  1000"
             exit 0
             ;;
         *)
@@ -47,8 +47,8 @@ echo "FULLY AUTOMATED CRC BENCHMARK SWEEP"
 echo "==================================================================="
 echo "This script will:"
 echo "  1. Run calibration to optimize lambdas"
-echo "  2. Automatically extract and update HARDCODED_LAMBDAS"
-echo "  3. Run benchmark queries for each confidence level"
+echo "  2. Save calibrated lambdas to JSON file"
+echo "  3. Run benchmark queries for each confidence level using the saved lambdas"
 echo "  4. Generate results CSV"
 echo ""
 echo "Configuration:"

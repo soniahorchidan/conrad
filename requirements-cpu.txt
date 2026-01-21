@@ -3,7 +3,6 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 bidict==0.22.1
 datasets==2.16.1
-kuzu==0.4.0
 neo4j==5.16.0
 tqdm==4.66.*
 torch==2.3.1
@@ -17,7 +16,6 @@ setuptools==69.5.1
 virtualenv==20.26.3
 build==1.2.1
 numpy==1.25
-fastapi[standard]
 dropbox==12.0.2
 ninja==1.11.1.3
 faiss-cpu
@@ -26,4 +24,3 @@ ogb==1.3.6
 torch-scatter
 torch-sparse
 rspmm==0.2.4
-google-cloud-bigquery

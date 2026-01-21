@@ -11,13 +11,11 @@ Architecture:
 
 Key functions:
 - compute_fnr_metrics: Unified metric computation (used by calibration and validation)
-- binomial_upper_bound: Statistical confidence bound for CRC
 
 All threshold comparisons use >= (not >) per conformal prediction theory.
 """
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional, Union, Set
-from scipy.stats import beta
 import logging
 
 
@@ -90,23 +88,6 @@ def get_alpha_bounds(n: int) -> Tuple[float, float]:
     alpha_lowerbound = n / ((n + 1) ** 2)
     alpha_upperbound = n * (n + 2) / ((n + 1) ** 2)
     return alpha_lowerbound, alpha_upperbound
-
-
-def binomial_upper_bound(m: int, n: int, delta: float) -> float:
-    """
-    One-sided Clopper–Pearson upper confidence bound.
-    
-    Args:
-        m: Number of successes
-        n: Number of trials
-        delta: Confidence level
-        
-    Returns:
-        Upper confidence bound
-    """
-    if m == n:
-        return 1.0
-    return beta.ppf(1 - delta, m + 1, n - m)
 
 
 def validate_model_name(model_name: str) -> None:
@@ -209,16 +190,13 @@ def compute_fnr_metrics(preds: List[Union[List[int], Set[int]]],
 
         # 2. Handle queries with no ground truth
         if len(gt_labels) == 0:
-            # If there is nothing to find, FNR is 0 (you missed nothing).
-            # However, precision is tricky. Usually, if pred_labels is empty, 
-            # precision is 1.0 (no false positives). If not empty, 0.0.
+            # If there is nothing to find, FNR is 0.
             fnrs[i] = 0.0
             precisions[i] = 1.0 if len(pred_labels) == 0 else 0.0
             f1s[i] = precisions[i] # Simple mapping for the no-GT case
             continue
 
         # 3. Calculate Recall and FNR
-        # If pred_labels is empty (abstention), recall is 0, FNR is 1.0.
         hits = len(pred_labels & gt_labels)
         recall = hits / len(gt_labels)
         fnrs[i] = 1.0 - recall
