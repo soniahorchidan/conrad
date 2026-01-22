@@ -83,24 +83,6 @@ class VectorConformalRiskControl:
         config_str = json.dumps(config_dict, sort_keys=True)
         return hashlib.md5(config_str.encode()).hexdigest()
 
-    def load_all_components(self, load_path: Optional[str] = None, 
-                          ignore_components: List[str] = None) -> None:
-        """
-        Load all components from the specified path.
-        
-        Args:
-            load_path: Path to load components from
-            ignore_components: List of components to ignore
-        """
-        if ignore_components is None:
-            ignore_components = []
-            
-        if load_path is not None:
-            self.data_manager.load_path = load_path
-            self.data_manager.load_all_hop_data()
-        
-        logging.info("Conformal risk control components loaded")
-
     def prepare_data(self, save_path: str, db_controller: Any, 
                     calibration_data_path: Optional[str] = None) -> None:
         """
@@ -137,16 +119,6 @@ class VectorConformalRiskControl:
         if self.data_manager.load_path is not None:
             logging.info("Saving calibration data to cache...")
             self.data_manager.save_calibration_data_cache(self._config_hash, "default")
-
-    def train(self, save_path: str, db_controller: Any) -> None:
-        """
-        Train the auxiliary model (no-op since auxiliary models are not used).
-        
-        Args:
-            save_path: Path to save model
-            db_controller: Database controller
-        """
-        logging.info("Auxiliary model training skipped - auxiliary models not used")
 
     def calibrate(self) -> Dict[str, Any]:
         """

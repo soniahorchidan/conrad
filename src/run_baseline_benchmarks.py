@@ -32,7 +32,7 @@ from tqdm import tqdm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'benchmark'))
 
 from inference import ModelFactory, parse_args_inference
-from utils import merge_args, set_logger, parse_time, get_embeddings, get_graph
+from utils import merge_args, set_logger, parse_time, get_graph
 from graph_handler import Neo4JBackendDBController
 from conformal_prediction.utils import compute_fnr_metrics
 import argparse as argparse_module

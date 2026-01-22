@@ -7,24 +7,6 @@ from models import MultiHopPredictor
 from .calibration_data_generator import CalibrationDataGenerator
 
 
-class ScoreAggregator:
-    """Handles score aggregation for multi-hop predictions."""
-    
-    @staticmethod
-    def aggregate_scores(nodes: List[int], scores: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor]]:
-        """Aggregate scores for nodes that appear multiple times."""
-        if not nodes or not scores:
-            return [], []
-            
-        result_scores = {}
-        for node, score in zip(nodes, scores):
-            result_scores.setdefault(node, []).append(score)
-        
-        final_nodes = list(result_scores.keys())
-        final_scores = [max(vals) for vals in result_scores.values()]
-        return final_nodes, final_scores
-
-
 class BasePipeline(nn.Module):
     """
     Base class for all pipeline models that provides common functionality.

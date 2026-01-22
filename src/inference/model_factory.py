@@ -53,31 +53,11 @@ class ModelFactory:
                 )
             model_args_dict = json.load(open(model_args_dict_path, "r"))
             self.model_args = self.model_parser(args2sequence(model_args_dict))
-            if "conformal_prediction" in model_args_dict:
-                self.model_args.conformal_prediction = conformal_prediction_parse_args(
-                    args2sequence(model_args_dict["conformal_prediction"])
-                )
         else:
-            model_args_dict = {
-                "conformal_prediction": {
-                    "negative_sample_size": 128,
-                    "hidden_dim": 200,
-                    "batch_size": 1024,
-                    "lr": 1e-3,
-                    "train_epochs": 50,
-                    "calib_size": 0.5,
-                    "log_epochs_freq": 10,
-                    "val_epochs_freq": 10,
-                    "train_size": 0.1,
-                    "val_size": 0.4
-                    }
-            }
-
+            # For pipeline models, create minimal model_args (they don't use most of it)
+            # Pipeline models use inf_args directly and conformal prediction is initialized separately
+            model_args_dict = {}
             self.model_args = self.model_parser(args2sequence(model_args_dict))
-            if "conformal_prediction" in model_args_dict:
-                self.model_args.conformal_prediction = conformal_prediction_parse_args(
-                    args2sequence(model_args_dict["conformal_prediction"])
-                )
 
 
         # Initialize Neo4j database controller
@@ -95,6 +75,10 @@ class ModelFactory:
         # Set num_nodes for all models
         self.model_args.num_nodes = num_nodes
        
+        # Pass use_multi_gpu flag to model args (default to True if not specified)
+        if not hasattr(self.inf_args, 'use_multi_gpu'):
+            self.inf_args.use_multi_gpu = True
+        self.model_args.use_multi_gpu = self.inf_args.use_multi_gpu
 
         if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
             # Load ULTRA model (once)
@@ -102,6 +86,12 @@ class ModelFactory:
             inf_args_ultra.model_to_infer = "ULTRA"
             model_factory_ultra = ModelFactory(inf_args_ultra)
             model_factory_ultra.prepare_model()
+            
+            # Setup multi-GPU for ULTRA model
+            if hasattr(model_factory_ultra.model, 'setup_multi_gpu'):
+                model_factory_ultra.model.setup_multi_gpu()
+                num_gpus_used = model_factory_ultra.model.num_gpus
+                logging.info(f"ULTRA inference configured: Using {num_gpus_used} GPU(s)")
 
             # Instantiate DBExecModel (rule-based, no weights to load)
             inf_args_dbexec = Namespace(**vars(self.inf_args))
@@ -120,6 +110,12 @@ class ModelFactory:
             model: ModelUtils = getattr(models, self.inf_args.model_to_infer)(
                 self.model_args, num_relations, self.inf_args.device
             )
+            
+            # Setup multi-GPU for direct ULTRA model
+            if hasattr(model, 'setup_multi_gpu'):
+                model.setup_multi_gpu()
+                num_gpus_used = model.num_gpus
+                logging.info(f"ULTRA inference configured: Using {num_gpus_used} GPU(s)")
         # Initialize conformal prediction (only for pipeline models)
         try:
             if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
@@ -146,6 +142,24 @@ class ModelFactory:
         
         # Move model to device
         model = model.to(self.inf_args.device)
+        
+        # Log final GPU usage summary
+        if torch.cuda.is_available() and self.inf_args.device.startswith('cuda'):
+            num_gpus_available = torch.cuda.device_count()
+            if hasattr(model, 'unified_predictor') and hasattr(model.unified_predictor, 'ultra'):
+                if hasattr(model.unified_predictor.ultra, 'num_gpus'):
+                    num_gpus_used = model.unified_predictor.ultra.num_gpus
+                    logging.info(f"GPU Usage Summary")
+                    logging.info(f"GPUs available: {num_gpus_available}")
+                    logging.info(f"GPUs used for ULTRA inference: {num_gpus_used}")
+                    logging.info(f"Multi-GPU enabled: {model.unified_predictor.ultra.use_multi_gpu}")
+            elif hasattr(model, 'num_gpus'):
+                num_gpus_used = model.num_gpus
+                logging.info(f"GPU Usage Summary")
+                logging.info(f"GPUs available: {num_gpus_available}")
+                logging.info(f"GPUs used for ULTRA inference: {num_gpus_used}")
+                logging.info(f"Multi-GPU enabled: {model.use_multi_gpu}")
+        
         return model
 
     def get_model_specific_args(self):

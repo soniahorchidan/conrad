@@ -6,24 +6,6 @@ from argparse import Namespace
 import logging
 
 
-# helper: safe per-row min-max to [a,b]
-def _normalize_rowwise(x, a=0.0, b=1.0, mask=None):
-    """
-    Rescale values in x (already known to be in [0, 1]) into [a, b].
-
-    If mask is given:
-      - only entries where mask=True are rescaled
-      - masked-out entries become 0
-    """
-    y = a + (b - a) * x
-
-    if mask is not None:
-        # keep only valid entries, fill others with 0
-        y = torch.where(mask, y, torch.zeros_like(y))
-
-    return y
-
-
 class MultiHopPredictor(nn.Module):
     """
     Builds one unified score s*(x,y) on the union of ULTRA and Neo4j candidates:

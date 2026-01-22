@@ -6,7 +6,6 @@ import json
 import logging
 import torch
 import pickle
-import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 from .model_config import ModelConfig
 
@@ -31,64 +30,6 @@ class CalibrationDataManager:
         
         # For vector CRC caching
         self.is_vector_model = ModelConfig.is_vector_model(model_name)
-
-    def load_calibration_data(self, hop_name: str) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[Dict]]:
-        """
-        Load calibration data for a specific hop.
-        
-        Args:
-            hop_name: Name of the hop (e.g., "1hop", "2hop", "3hop")
-            
-        Returns:
-            Tuple of (cal_scores, true_labels, metadata)
-        """
-        if self.load_path is None:
-            return None, None, None
-            
-        model_dir = os.path.join(self.load_path, f"risk_control_{self.model_name}_{hop_name}")
-        
-        if not os.path.exists(model_dir):
-            logging.info(f"Calibration scores for {hop_name} not found. Recalibration required.")
-            return None, None, None
-
-        logging.info(f"Loading calibration scores, true labels and metadata for {hop_name} from {self.load_path}")
-
-        # Load calibration scores
-        cal_scores_path = os.path.join(model_dir, "cal_scores.pth")
-        cal_scores = None
-        if os.path.exists(cal_scores_path):
-            cal_scores = torch.load(cal_scores_path)
-
-        # Load true labels
-        true_labels_path = os.path.join(model_dir, "true_labels.pth")
-        true_labels = None
-        if os.path.exists(true_labels_path):
-            true_labels = torch.load(true_labels_path)
-
-        # Load metadata
-        metadata_path = os.path.join(self.load_path, f"metadata_crc_{hop_name}.json")
-        metadata = None
-        if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as file:
-                metadata = json.load(file)[self.model_name.lower()]["calibrate"]
-
-        return cal_scores, true_labels, metadata
-
-    def load_all_hop_data(self) -> None:
-        """Load calibration data for all hops."""
-        if self.load_path is None:
-            logging.info("No load path provided, skipping loading of calibration scores")
-            return
-
-        for hop_name in ["1hop", "2hop", "3hop"]:
-            cal_scores, true_labels, metadata = self.load_calibration_data(hop_name)
-            
-            if cal_scores is not None:
-                setattr(self, f"cal_scores_{hop_name}", cal_scores)
-            if true_labels is not None:
-                setattr(self, f"true_labels_{hop_name}", true_labels)
-            if metadata is not None:
-                setattr(self, f"metadata_{hop_name}", metadata)
 
     def set_calibration_data(self, cal_scores: List, true_labels: List, cal_queries: List) -> None:
         """

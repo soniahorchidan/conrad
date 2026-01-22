@@ -202,10 +202,9 @@ class DataIterator(object):
         if mode == "val":
             size_ratio = args.gen_val_num
         elif mode == "calib":
-            assert hasattr(args, "conformal_prediction")
-            # size_ratio = args.conformal_prediction.calib_size
+            # Using hardcoded size ratio for calibration mode
             size_ratio = 0.00001
-            logging.info(f"Using HARCODED size ratio calib mode to {size_ratio}!!")
+            logging.info(f"Using hardcoded size ratio calib mode to {size_ratio}!!")
 
         else:
             size_ratio = 1

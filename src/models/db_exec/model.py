@@ -140,24 +140,6 @@ class DBExecModel(nn.Module, ModelUtils):
             elif hop_count == 3:
                 # Batch 3-hop queries with same relation types
                 self._process_three_hop_batch(group_queries, indices, results, scores)
-            else:
-                # Fallback to individual processing
-                for q, idx in zip(group_queries, indices):
-                    if hop_count == 1:
-                        cypher = self.ONE_HOP_TEMPLATE % (q[0], q[1])
-                    elif hop_count == 2:
-                        cypher = self.TWO_HOP_TEMPLATE % (q[0], q[1], q[2])
-                    elif hop_count == 3:
-                        cypher = self.THREE_HOP_TEMPLATE % (q[0], q[1], q[2], q[3])
-                    
-                    res = self.backend_controller.execute_query(cypher)
-                    res = [record["r.id"] for record in res]
-                    results[idx] = res
-                    
-                    if len(res) > 0:
-                        scores[idx] = self._compute_scores(res, rel_type)
-                    else:
-                        scores[idx] = {}
         
         return results, scores
 
@@ -274,10 +256,6 @@ class DBExecModel(nn.Module, ModelUtils):
             else:
                 scores[idx] = {}
 
-
-    def forward(self, graph_data, query):
-        pass
-    
     def generateCalibrateSamples(
         self, queries, answers, batch_size=32
     ):

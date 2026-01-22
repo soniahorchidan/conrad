@@ -91,28 +91,23 @@ class CalibrationDataGenerator:
         if calib_iterator is not None:
             return calib_iterator
         
-        if calibration_data_path is not None:
-            # Use file-based iterator from saved calibration data
-            # Load graph_data from database if not cached in the calibration directory
-            from .dataloader import DataIterator as DI
-            graph_data = DI.get_graph_data(db_controller, self.device)
-            
-            return FileBasedDataIterator(
-                calibration_data_path,
-                batch_size=self.model.args.batch_size,
-                device=self.device,
-                graph_data=graph_data  # Pass graph_data from database
+        if calibration_data_path is None:
+            raise ValueError(
+                "calibration_data_path is required. "
+                "Calibration queries must be pre-generated using scripts/generate_calibration.sh"
             )
-        else:
-            # Fall back to database-based iterator
-            return DataIterator(
-                self.model.args,
-                save_path,
-                db_controller,
-                self.device,
-                "calib",
-                set(),
-            )
+        
+        # Use file-based iterator from saved calibration data
+        # Load graph_data from database if not cached in the calibration directory
+        from .dataloader import DataIterator as DI
+        graph_data = DI.get_graph_data(db_controller, self.device)
+        
+        return FileBasedDataIterator(
+            calibration_data_path,
+            batch_size=self.model.args.batch_size,
+            device=self.device,
+            graph_data=graph_data  # Pass graph_data from database
+        )
     
     def _process_calibration_batches(self, calib_iterator: Any) -> Tuple[List[torch.Tensor], Any, Any]:
         """Process all calibration batches."""
@@ -148,75 +143,11 @@ class CalibrationDataGenerator:
             kept_indices = []
             batch_filtered = 0
             
-            # When batch_size=1, ensure we process truly one query at a time for maximum memory efficiency
-            # Even if iterator gives us a batch, process each query individually
-            if self.calib_batch_size == 1:
-                # Ensure query is 2D [batch_size, query_dim]
-                if query.dim() == 1:
-                    query = query.unsqueeze(0)
-                
-                # Process each query individually
-                num_queries = query.shape[0]
-                for query_idx in range(num_queries):
-                    single_query = query[query_idx:query_idx+1].clone()
-                    single_ans = [ans_list[query_idx]] if query_idx < len(ans_list) else ans_list
-                    
-                    # Predict single query with immediate cleanup
-                    try:
-                        single_pred_out = self.model._predict(single_query, zero_thresholds, graph_data, single_ans)
-                        
-                        if single_pred_out:
-                            pred_out = single_pred_out[0]
-                            gt_labels = ans_list[query_idx] if query_idx < len(ans_list) else None
-                            
-                            try:
-                                if is_2u:
-                                    gt_size = len(gt_labels) if isinstance(gt_labels, (list, set)) else 0
-                                    if gt_size > self.max_gt_size:
-                                        batch_filtered += 1
-                                        continue
-                                    vector_nc_scores = self._extract_2u_scores(pred_out, gt_labels)
-                                elif is_2ip:
-                                    if isinstance(gt_labels, dict):
-                                        gt_final = gt_labels.get(3, gt_labels.get('final', []))
-                                        gt_size = len(gt_final)
-                                    else:
-                                        gt_size = len(gt_labels) if isinstance(gt_labels, (list, set)) else 0
-                                    if gt_size > self.max_gt_size:
-                                        batch_filtered += 1
-                                        continue
-                                    vector_nc_scores = self._extract_2ip_scores(pred_out, gt_labels)
-                                else:
-                                    if gt_labels and 3 in gt_labels:
-                                        gt_hop3_size = len(gt_labels[3])
-                                        if gt_hop3_size > self.max_gt_size:
-                                            batch_filtered += 1
-                                            continue
-                                    vector_nc_scores = self._extract_vector_scores(pred_out, gt_labels)
-                                
-                                all_scores.append(vector_nc_scores)
-                                kept_indices.append(query_idx)
-                                if query_idx < len(ans_list):
-                                    all_answers.append(ans_list[query_idx])
-                                all_queries.append(single_query[0].cpu())
-                            finally:
-                                del pred_out
-                    finally:
-                        del single_query, single_pred_out
-                        if torch.cuda.is_available():
-                            torch.cuda.synchronize()
-                            torch.cuda.empty_cache()
-                
-                # Skip the batch processing loop below
-                total_filtered += batch_filtered
-                total_processed += len(kept_indices)
-                # Clear graph_data reference
-                del graph_data
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                continue
+            # Ensure query is 2D [batch_size, query_dim]
+            if query.dim() == 1:
+                query = query.unsqueeze(0)
             
-            # Predict with GT restriction (use zero thresholds) - for batch_size > 1
+            # Predict with GT restriction (use zero thresholds)
             batch_pred_out = self.model._predict(query, zero_thresholds, graph_data, ans)
             
             for idx, pred_out in enumerate(batch_pred_out):
@@ -263,9 +194,6 @@ class CalibrationDataGenerator:
                 finally:
                     # Clear pred_out immediately after extraction to free GPU memory
                     del pred_out
-                    # Clear cache after each query when batch_size=1
-                    if self.calib_batch_size == 1 and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
             
             total_filtered += batch_filtered
             total_processed += len(kept_indices)
@@ -281,25 +209,10 @@ class CalibrationDataGenerator:
                 else:
                     all_queries.append(query.cpu() if isinstance(query, torch.Tensor) and query.is_cuda else query)
             
-            # Clear GPU memory after each batch to prevent accumulation
+            # Clear GPU memory after each batch
             del batch_pred_out
-            # Move query and graph_data off GPU if they're tensors
-            if isinstance(query, torch.Tensor) and query.is_cuda:
-                query = query.cpu()
-            if hasattr(graph_data, 'to') and hasattr(graph_data, 'device') and str(graph_data.device).startswith('cuda'):
-                # graph_data might be a Data object, be careful
-                pass  # Don't move graph_data as it might be reused
-            
             if torch.cuda.is_available():
-                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
-            
-            # Periodic more aggressive cleanup every 5 batches (more frequent)
-            if (batch_idx + 1) % 5 == 0 and torch.cuda.is_available():
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
         
         logging.info(f"Calibration processing complete - Processed: {total_processed}, Filtered: {total_filtered}")
         return all_scores, all_answers, all_queries
@@ -324,8 +237,7 @@ class CalibrationDataGenerator:
         scores1 = pred_out["branch1"]["scores"]
         scores2 = pred_out["branch2"]["scores"]
 
-        # Build a must-include set similar to the 3p path-aware extraction:
-        # include GT + nodes scoring above the minimum GT score under MAX aggregation.
+        # Include GT nodes directly
         must_include = set()
         if gt_labels is not None:
             if isinstance(gt_labels, set):
@@ -333,7 +245,7 @@ class CalibrationDataGenerator:
             elif isinstance(gt_labels, list):
                 gt = [int(x) for x in gt_labels]
             elif isinstance(gt_labels, dict):
-                # Best-effort: union over all dict values.
+                # Union over all dict values
                 gt = []
                 for v in gt_labels.values():
                     if isinstance(v, (list, set)):
@@ -344,12 +256,7 @@ class CalibrationDataGenerator:
             if gt:
                 combined = torch.maximum(scores1.squeeze(0), scores2.squeeze(0))
                 valid = [i for i in gt if 0 <= int(i) < combined.size(0)]
-                if valid:
-                    idx_tensor = torch.tensor(valid, device=combined.device, dtype=torch.long)
-                    min_gt = float(combined[idx_tensor].min().item())
-                    hi = torch.nonzero(combined >= min_gt, as_tuple=False).flatten().tolist()
-                    must_include.update(int(i) for i in hi)
-                    must_include.update(int(i) for i in valid)
+                must_include.update(int(i) for i in valid)
 
         b1_processed = self._process_single_hop_scores(
             scores1, must_include=must_include if must_include else None
@@ -446,27 +353,14 @@ class CalibrationDataGenerator:
                 gt_intersection = set()
                 gt_final = set()
             
-            # For intersection: include GT intersection nodes + nodes scoring above min GT score
+            # For intersection: include GT intersection nodes directly
             if gt_intersection:
                 valid_gt = [int(idx) for idx in gt_intersection if 0 <= int(idx) < intersection_scores_tensor.size(0)]
-                if valid_gt:
-                    idx_tensor = torch.tensor(valid_gt, device=intersection_scores_tensor.device, dtype=torch.long)
-                    min_gt_score = float(intersection_scores_tensor[idx_tensor].min().item())
-                    high_score_indices = torch.nonzero(
-                        intersection_scores_tensor >= min_gt_score, as_tuple=False
-                    ).flatten().tolist()
-                    intersection_must_include.update(int(idx) for idx in high_score_indices)
-                    intersection_must_include.update(int(idx) for idx in valid_gt)
+                intersection_must_include.update(int(idx) for idx in valid_gt)
             
-            # For projection: include GT final nodes + nodes scoring above min GT score
-            if gt_final and isinstance(projection_scores, dict):
-                gt_scores = [projection_scores.get(int(node), 0.0) for node in gt_final]
-                if gt_scores:
-                    min_gt_proj_score = min(gt_scores)
-                    for node_id, score in projection_scores.items():
-                        if score >= min_gt_proj_score:
-                            projection_must_include.add(int(node_id))
-                    projection_must_include.update(int(node) for node in gt_final)
+            # For projection: include GT final nodes directly
+            if gt_final:
+                projection_must_include.update(int(node) for node in gt_final)
         
         # Process branch scores (for backward compatibility, though not used in 2D optimization)
         b1_processed = self._process_single_hop_scores(
@@ -540,21 +434,11 @@ class CalibrationDataGenerator:
         gt_hop2 = set(gt_labels.get(2, []))
         gt_hop3 = set(gt_labels.get(3, []))
         
-        min_gt_thresholds = self._compute_min_gt_thresholds(pred_out, gt_labels)
-        hop1_threshold = min_gt_thresholds.get(1)
-        hop2_threshold = min_gt_thresholds.get(2)
-        hop3_threshold = min_gt_thresholds.get(3)
-        
         # Build hop1 data - use top-K format like hop2/hop3
         hop1_scores_flat = hop1_scores.squeeze(0)
         
-        # Collect must_include nodes (GT + high-scoring nodes above threshold)
+        # Include GT nodes directly (no need for threshold computation)
         must_include = set()
-        if hop1_threshold is not None:
-            high_score_indices = torch.nonzero(
-                hop1_scores_flat >= hop1_threshold, as_tuple=False
-            ).flatten().tolist()
-            must_include.update(int(idx) for idx in high_score_indices)
         if gt_hop1:
             must_include.update(int(idx) for idx in gt_hop1 if 0 <= idx < hop1_scores_flat.size(0))
         
@@ -575,63 +459,44 @@ class CalibrationDataGenerator:
         # Check if hop2_scores_list is a list (for 3p queries) or a tensor (for 2ip/2u queries)
         if isinstance(hop2_scores_list, list):
             for path_info in hop2_scores_list:
-                if isinstance(path_info, dict) and 'parent' in path_info and 'scores' in path_info:
-                    path_scores = path_info['scores']
-                    must_include = set(gt_hop2)
-                    
-                    if hop2_threshold is not None:
-                        path_flat = path_scores.squeeze(0)
-                        high_score_indices = torch.nonzero(
-                            path_flat >= hop2_threshold, as_tuple=False
-                        ).flatten().tolist()
-                        must_include.update(int(idx) for idx in high_score_indices)
-                    
-                    processed_scores = self._process_single_hop_scores(
-                        path_scores,
-                        must_include=must_include if must_include else None
-                    )
-                    
-                    hop2_data.append({
-                        'parent': int(path_info['parent']),
-                        'scores': processed_scores
-                    })
-                elif isinstance(path_info, torch.Tensor):
-                    path_scores = path_info
-                    must_include = set(gt_hop2)
-                    
-                    if hop2_threshold is not None:
-                        path_flat = path_scores.squeeze(0)
-                        high_score_indices = torch.nonzero(
-                            path_flat >= hop2_threshold, as_tuple=False
-                        ).flatten().tolist()
-                        must_include.update(int(idx) for idx in high_score_indices)
-                    
-                    parent_idx = len(hop2_data)
-                    hop2_data.append({
-                        'parent': int(hop1_nodes[parent_idx]) if parent_idx < len(hop1_nodes) else -1,
-                        'scores': self._process_single_hop_scores(
+                    if isinstance(path_info, dict) and 'parent' in path_info and 'scores' in path_info:
+                        path_scores = path_info['scores']
+                        # Include GT nodes directly
+                        must_include = set(gt_hop2) if gt_hop2 else None
+                        
+                        processed_scores = self._process_single_hop_scores(
                             path_scores,
-                            must_include=must_include if must_include else None
+                            must_include=must_include
                         )
-                    })
+                        
+                        hop2_data.append({
+                            'parent': int(path_info['parent']),
+                            'scores': processed_scores
+                        })
+                    elif isinstance(path_info, torch.Tensor):
+                        path_scores = path_info
+                        # Include GT nodes directly
+                        must_include = set(gt_hop2) if gt_hop2 else None
+                        
+                        parent_idx = len(hop2_data)
+                        hop2_data.append({
+                            'parent': int(hop1_nodes[parent_idx]) if parent_idx < len(hop1_nodes) else -1,
+                            'scores': self._process_single_hop_scores(
+                                path_scores,
+                                must_include=must_include
+                            )
+                        })
         elif isinstance(hop2_scores_list, torch.Tensor):
             # For 2ip queries: hop2_scores_list is a single tensor, not a list
             # Process it as a single branch score
-            must_include = set(gt_hop2)
-            
-            if hop2_threshold is not None:
-                hop2_flat = hop2_scores_list.squeeze(0) if hop2_scores_list.dim() > 1 else hop2_scores_list
-                high_score_indices = torch.nonzero(
-                    hop2_flat >= hop2_threshold, as_tuple=False
-                ).flatten().tolist()
-                must_include.update(int(idx) for idx in high_score_indices)
+            must_include = set(gt_hop2) if gt_hop2 else None
             
             # For 2ip, hop2_data should be in the same format as hop1
             hop2_data = {
                 'nodes': pred_out.get("hop2", {}).get("nodes", []),
                 'scores': self._process_single_hop_scores(
                     hop2_scores_list,
-                    must_include=must_include if must_include else None
+                    must_include=must_include
                 )
             }
         
@@ -651,12 +516,6 @@ class CalibrationDataGenerator:
                     if 0 <= node_id < self.num_entities:
                         hop3_scores_tensor[node_id] = score
                 
-                if hop3_threshold is not None:
-                    high_score_indices = torch.nonzero(
-                        hop3_scores_tensor >= hop3_threshold, as_tuple=False
-                    ).flatten().tolist()
-                    must_include.update(int(idx) for idx in high_score_indices)
-                
                 hop3_data = {
                     'nodes': hop3_nodes,
                     'scores': self._process_single_hop_scores(
@@ -670,7 +529,6 @@ class CalibrationDataGenerator:
             # For 3p: hop3 is path-aware
             hop3_data = self._extract_hop3_path_data(
                 hop3_scores_list,
-                hop3_threshold,
                 gt_hop3
             )
         
@@ -682,7 +540,6 @@ class CalibrationDataGenerator:
     
     def _extract_hop3_path_data(self,
                                 hop3_scores_list: List[Dict[str, Any]],
-                                hop3_threshold: Optional[float],
                                 gt_hop3_entities: Optional[set]) -> List[Dict[str, Any]]:
         """
         Extract hop3 data with parent path information.
@@ -692,18 +549,12 @@ class CalibrationDataGenerator:
         for path_info in hop3_scores_list:
             if isinstance(path_info, dict) and 'parent' in path_info and 'scores' in path_info:
                 scores_tensor = path_info['scores']
-                must_include = set(gt_hop3_entities) if gt_hop3_entities else set()
-                
-                if hop3_threshold is not None:
-                    scores_flat = scores_tensor.squeeze(0)
-                    high_score_indices = torch.nonzero(
-                        scores_flat >= hop3_threshold, as_tuple=False
-                    ).flatten().tolist()
-                    must_include.update(int(idx) for idx in high_score_indices)
+                # Include GT nodes directly
+                must_include = set(gt_hop3_entities) if gt_hop3_entities else None
                 
                 processed_scores = self._process_single_hop_scores(
                     scores_tensor,
-                    must_include=must_include if must_include else None
+                    must_include=must_include
                 )
                 
                 hop3_data.append({
@@ -712,81 +563,6 @@ class CalibrationDataGenerator:
                 })
         
         return hop3_data
-    
-    def _compute_min_gt_thresholds(self, pred_out: Dict[str, Dict[str, Any]],
-                                   gt_labels: Dict[int, List[int]]) -> Dict[int, float]:
-        """Compute per-hop minimum GT score thresholds under MAX aggregation."""
-        thresholds: Dict[int, float] = {}
-        
-        if not gt_labels:
-            return thresholds
-        
-        def _valid_indices(indices: Iterable[int], limit: int) -> List[int]:
-            return [int(idx) for idx in indices if 0 <= int(idx) < limit]
-        
-        # Hop1 uses direct scores
-        gt_hop1 = gt_labels.get(1, [])
-        if gt_hop1:
-            hop1_scores = pred_out["hop1"]["scores"].squeeze(0)
-            valid = _valid_indices(gt_hop1, hop1_scores.size(0))
-            if valid:
-                idx_tensor = torch.tensor(valid, device=hop1_scores.device)
-                thresholds[1] = float(hop1_scores[idx_tensor].min().item())
-        
-        # Hop2 uses MAX aggregation across paths
-        gt_hop2 = gt_labels.get(2, [])
-        if gt_hop2:
-            hop2_scores_list = pred_out["hop2"]["scores"] if "hop2" in pred_out else []
-            hop2_tensors = []
-            for path_info in hop2_scores_list:
-                if isinstance(path_info, dict) and 'scores' in path_info:
-                    hop2_tensors.append(path_info['scores'])
-                elif isinstance(path_info, torch.Tensor):
-                    hop2_tensors.append(path_info)
-            if hop2_tensors:
-                hop2_aggregated = self._process_multi_hop_scores(hop2_tensors)
-                valid = _valid_indices(gt_hop2, hop2_aggregated.size(0))
-                if valid:
-                    idx_tensor = torch.tensor(valid, device=hop2_aggregated.device)
-                    thresholds[2] = float(hop2_aggregated[idx_tensor].min().item())
-        
-        # Hop3 uses MAX aggregation across paths
-        gt_hop3 = gt_labels.get(3, [])
-        if gt_hop3:
-            hop3_scores_list = pred_out["hop3"]["scores"] if "hop3" in pred_out else []
-            hop3_tensors = []
-            for path_info in hop3_scores_list:
-                if isinstance(path_info, dict) and 'scores' in path_info:
-                    hop3_tensors.append(path_info['scores'])
-                elif isinstance(path_info, torch.Tensor):
-                    hop3_tensors.append(path_info)
-            if hop3_tensors:
-                hop3_aggregated = self._process_multi_hop_scores(hop3_tensors)
-                valid = _valid_indices(gt_hop3, hop3_aggregated.size(0))
-                if valid:
-                    idx_tensor = torch.tensor(valid, device=hop3_aggregated.device)
-                    thresholds[3] = float(hop3_aggregated[idx_tensor].min().item())
-        
-        return thresholds
-    
-    def _process_hop_scores_to_entity_dim(self, hop_scores: Union[torch.Tensor, List[torch.Tensor]]) -> torch.Tensor:
-        """
-        Process hop scores to ensure consistent entity dimension (14541).
-        
-        Args:
-            hop_scores: Either a single tensor (hop1) or list of tensors (hop2, hop3)
-            
-        Returns:
-            Tensor of shape (14541,) with scores for all entities
-        """
-        if isinstance(hop_scores, torch.Tensor):
-            # Single tensor case (hop1)
-            return self._process_single_hop_scores(hop_scores)
-        elif isinstance(hop_scores, list):
-            # List of tensors case (hop2, hop3) - use max aggregation
-            return self._process_multi_hop_scores(hop_scores)
-        else:
-            raise ValueError(f"Unexpected hop_scores type: {type(hop_scores)}")
     
     def _process_single_hop_scores(self, hop_scores: torch.Tensor, top_k: Optional[int] = None,
                                    must_include: Optional[Iterable[int]] = None) -> Dict[str, torch.Tensor]:

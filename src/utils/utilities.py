@@ -5,19 +5,10 @@ import torch
 import logging
 import os
 import json
-import requests
-import hashlib
 from argparse import Namespace
 from typing import List
 from torch_scatter import scatter_add
 from torch_geometric.data import Data
-
-
-def count_frequency(queries, answers, start=4):
-    count = {}
-    for query in queries:
-        count[query] = start + len(answers[query])
-    return count
 
 
 def remove_duplicates(list_of_lists):
@@ -34,20 +25,6 @@ def remove_duplicates(list_of_lists):
     result = list(set(list_of_tuples))
     result = [list(x) for x in result]
     return result
-
-
-def calc_params_num(model):
-    num_params = 0
-    for _, param in model.named_parameters():
-        if param.requires_grad:
-            num_params += np.prod(param.size())
-    return num_params
-
-
-def log_args(args: Namespace, name: str = "Arguments"):
-    logging.info(name + ":")
-    for k, v in vars(args).items():
-        logging.info(f"{k}: {v}")
 
 
 def parse_time():
@@ -95,14 +72,6 @@ def merge_args(parse_args, json_args_name, json_keys, command_line_args=None):
     return args
 
 
-def set_global_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-
-
 def save_component(save_path: str, model_name: str, component_name: str, component):
     os.makedirs(os.path.join(save_path, model_name), exist_ok=True)
     torch.save(component, os.path.join(save_path, model_name, component_name + ".pth"))
@@ -132,130 +101,6 @@ def set_logger(log_path, file_name, print_on_screen):
         )
         console.setFormatter(formatter)
         logging.getLogger("").addHandler(console)
-
-
-def log_metrics(mode, step, metrics):
-    """
-    Print the evaluation logs
-    """
-    for metric in metrics:
-        logging.info("%s %s at step %d: %f" % (mode, metric, step, metrics[metric]))
-
-
-def override_config(args):  #! may update here
-    """
-    Override model and data configuration
-    """
-
-    with open(os.path.join(args.init_checkpoint, "config.json"), "r") as fjson:
-        argparse_dict = json.load(fjson)
-
-    if args.data_path is None:
-        args.data_path = argparse_dict["data_path"]
-    args.model = argparse_dict["model"]
-    args.hidden_dim = argparse_dict["hidden_dim"]
-
-
-def override_all_config(args, exemption=[]):  #! may update here
-    """
-    Override model and data configuration
-    """
-
-    with open(os.path.join(args.init_checkpoint, "config.json"), "r") as fjson:
-        argparse_dict = json.load(fjson)
-
-    for key in argparse_dict:
-        if key in exemption:
-            continue
-        args.__dict__[key] = argparse_dict[key]
-
-
-def np_save(save_path, file_name, arr):
-    """
-    Save numpy array
-    """
-    np.save(os.path.join(save_path, file_name), arr)
-
-
-def calc_metrics(scores: torch.Tensor, answers: list):
-    """
-    Calculate metrics for a pair of scores and answers.
-    Higher scores are better.
-    """
-    _, indices = torch.sort(scores, descending=True)
-    answers_tensor = torch.tensor(answers, device=scores.device)
-    rankings = indices.unsqueeze(1) == answers_tensor
-    rankings = rankings.nonzero(as_tuple=False)[:, 0] + 1
-
-    hits1 = torch.mean((rankings <= 1).to(torch.float)).item()
-    hits3 = torch.mean((rankings <= 3).to(torch.float)).item()
-    hits10 = torch.mean((rankings <= 10).to(torch.float)).item()
-    mrr = torch.mean(1.0 / rankings.to(torch.float)).item()
-
-    metrics = {"MRR": mrr, "HITS@1": hits1, "HITS@3": hits3, "HITS@10": hits10}
-    return metrics
-
-
-def calc_metrics_batch(scores: torch.Tensor, answers: list):
-    """
-    Calculate metrics for a batch of scores and answers.
-    Higher scores are better.
-    """
-    batch_size = scores.shape[0]
-    indices = torch.argsort(scores, dim=1, descending=True)
-
-    all_rankings = []
-    for i in range(batch_size):
-        answer_set = torch.tensor(answers[i], device=scores.device)
-        rankings = (indices[i].unsqueeze(0) == answer_set.unsqueeze(1)).nonzero(
-            as_tuple=False
-        )[:, 1] + 1
-        all_rankings.append(rankings)
-
-    rankings = torch.cat(all_rankings)
-
-    hits1 = torch.mean((rankings <= 1).to(torch.float)).item()
-    hits3 = torch.mean((rankings <= 3).to(torch.float)).item()
-    hits10 = torch.mean((rankings <= 10).to(torch.float)).item()
-    mrr = torch.mean(1.0 / rankings.to(torch.float)).item()
-
-    metrics = {"MRR": mrr, "HITS@1": hits1, "HITS@3": hits3, "HITS@10": hits10}
-    return metrics
-
-
-class AverageMeter(object):
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.avg = 0
-        self.sum = 0
-        self.cnt = 0
-
-    def update(self, val, n=1):
-        self.sum += val * n
-        self.cnt += n
-        self.avg = self.sum / self.cnt
-
-
-class AverageMeterDict(object):
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.avg = {}
-        self.sum = {}
-        self.cnt = {}
-
-    def update(self, val_dict, n=1):
-        for key in val_dict:
-            if key not in self.avg:
-                self.avg[key] = 0
-                self.sum[key] = 0
-                self.cnt[key] = 0
-            self.sum[key] += val_dict[key] * n
-            self.cnt[key] += n
-            self.avg[key] = self.sum[key] / self.cnt[key]
 
 
 def get_graph(db_controller, device, augment_inverse_edges=True, relation_graph=True):

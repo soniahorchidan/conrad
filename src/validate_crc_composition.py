@@ -238,13 +238,21 @@ class CRCBenchmarkValidator:
         return entity_id, rel_types, confidence
     
     def run_prediction(self, model, query_tensor: torch.Tensor, 
-                       confidence: float, graph_data: Any) -> List[int]:
-        """Run model prediction."""
+                       confidence: float, graph_data: Any) -> List[List[int]]:
+        """Run model prediction. Returns list of predictions (one per query in batch)."""
         with torch.no_grad():
             results = model.predict(query_tensor, confidence, graph_data)
         
-        if isinstance(results, list) and len(results) > 0:
-            return results[0] if isinstance(results[0], list) else results
+        if isinstance(results, list):
+            # Handle batched results
+            if len(results) > 0 and isinstance(results[0], list):
+                # Results is already a list of lists
+                return results
+            elif len(results) > 0:
+                # Single result, wrap in list
+                return [results]
+            else:
+                return []
         else:
             raise ValueError(f"Unexpected results format: {type(results)}")
     
@@ -287,44 +295,23 @@ class CRCBenchmarkValidator:
         """Process a single query and return results."""
         try:
             entity_or_tuple, rel_types, confidence = self.parse_query(query)
-            
-            # Use override confidence if provided (for benchmark sweeps)
             if override_confidence is not None:
                 confidence = override_confidence
             
-            # Build query tensor based on query type
-            if isinstance(entity_or_tuple, tuple):
-                # 2u or 2ip query: (anchor1, anchor2), [rel1, rel2] or [rel1, rel2, rel3]
-                anchor1, anchor2 = entity_or_tuple
-                if len(rel_types) == 2:
-                    # 2u query: [anchor1, rel1, anchor2, rel2]
-                    query_tensor = torch.tensor([[anchor1, rel_types[0], anchor2, rel_types[1]]], dtype=torch.long)
-                elif len(rel_types) == 3:
-                    # 2ip query: [anchor1, rel1, anchor2, rel2, rel3]
-                    query_tensor = torch.tensor([[anchor1, rel_types[0], anchor2, rel_types[1], rel_types[2]]], dtype=torch.long)
-                else:
-                    raise ValueError(f"Unexpected number of relations for tuple query: {len(rel_types)}")
-            else:
-                # 3p query: entity_id, [rel1, rel2, rel3]
-                query_tensor = torch.tensor([[entity_or_tuple] + rel_types], dtype=torch.long)
+            query_tensor = self._build_query_tensor(entity_or_tuple, rel_types)
             
             # Validate tensor shape based on query type
             expected_shape = (1, 5) if len(rel_types) == 3 and isinstance(entity_or_tuple, tuple) else (1, 4)
             assert query_tensor.shape == expected_shape, f"Expected tensor shape {expected_shape}, got {query_tensor.shape}"
             
-            # Measure query execution time
             start_time = time.time()
-            predicted_values = self.run_prediction(model, query_tensor, confidence, graph_data)
-            query_time_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
-            predicted_values = self._convert_to_int_list(predicted_values)
+            predicted_batch = self.run_prediction(model, query_tensor, confidence, graph_data)
+            query_time_ms = (time.time() - start_time) * 1000
             
-            # Ensure ground truth is a list of integers
-            if ground_truth:
-                ground_truth = [int(x) for x in ground_truth]
+            predicted_values = self._convert_to_int_list(predicted_batch[0]) if predicted_batch else []
+            ground_truth = [int(x) for x in ground_truth] if ground_truth else []
             
-            # Check if this is an abstention (empty prediction set)
             is_abstained = len(predicted_values) == 0
-            
             fnr, precision, f1 = compute_fnr_metrics([predicted_values], [ground_truth])
             recall = 1 - fnr
             
@@ -334,8 +321,12 @@ class CRCBenchmarkValidator:
             logging.error(f"Error processing query: {e}", exc_info=True)
             return None
     
-    def process_queries(self, model, graph_data: Any):
-        """Process all queries for the configured query type."""
+    def process_queries(self, model, graph_data: Any, inference_batch_size: int = 1):
+        """Process all queries for the configured query type. Uses batching if batch_size > 1."""
+        if inference_batch_size > 1:
+            return self.process_queries_batched(model, graph_data, inference_batch_size)
+        
+        # Original single-query processing
         start_time = time.time()
         test_queries_path = self.config.test_queries_path
         query_type = self.config.query_type
@@ -378,6 +369,139 @@ class CRCBenchmarkValidator:
         total_queries_processed = sum(len(results) for results in self.all_results[query_type].values())
         logging.info(f"Total time to process all benchmark queries: {total_time_seconds:.2f}s ({total_time_ms:.2f}ms) for {total_queries_processed} queries")
         print(f"\nTotal time to process all benchmark queries: {total_time_seconds:.2f}s ({total_time_ms:.2f}ms) for {total_queries_processed} queries")
+    
+    def _build_query_tensor(self, entity_or_tuple: Any, rel_types: List[int]) -> torch.Tensor:
+        """Build query tensor from parsed query components."""
+        if isinstance(entity_or_tuple, tuple):
+            anchor1, anchor2 = entity_or_tuple
+            if len(rel_types) == 2:
+                return torch.tensor([[anchor1, rel_types[0], anchor2, rel_types[1]]], dtype=torch.long)
+            elif len(rel_types) == 3:
+                return torch.tensor([[anchor1, rel_types[0], anchor2, rel_types[1], rel_types[2]]], dtype=torch.long)
+            else:
+                raise ValueError(f"Unexpected number of relations for tuple query: {len(rel_types)}")
+        else:
+            return torch.tensor([[entity_or_tuple] + rel_types], dtype=torch.long)
+    
+    def _build_batch_tensor(self, queries: List[str], override_confidence: float = None) -> Tuple[torch.Tensor, float]:
+        """Parse queries and build a batched query tensor."""
+        query_tensors = []
+        for query in queries:
+            entity_or_tuple, rel_types, confidence = self.parse_query(query)
+            if override_confidence is not None:
+                confidence = override_confidence
+            query_tensor = self._build_query_tensor(entity_or_tuple, rel_types)
+            query_tensors.append(query_tensor)
+        
+        batch_query = torch.cat(query_tensors, dim=0)
+        batch_confidence = override_confidence or self.config.confidence
+        return batch_query, batch_confidence
+    
+    def _convert_predictions_to_results(self, predicted_batch: List[List[int]], 
+                                       ground_truths: List[List[int]], 
+                                       batch_time_ms: float) -> List[QueryResult]:
+        """Convert batch predictions to QueryResult objects."""
+        results = []
+        for pred, gt in zip(predicted_batch, ground_truths):
+            pred = self._convert_to_int_list(pred)
+            gt = [int(x) for x in gt] if gt else []
+            is_abstained = len(pred) == 0
+            
+            fnr, precision, f1 = compute_fnr_metrics([pred], [gt])
+            recall = 1 - fnr
+            
+            query_time_ms = batch_time_ms / len(predicted_batch) if len(predicted_batch) > 0 else 0
+            results.append(QueryResult(precision, recall, f1, pred, gt, is_abstained, query_time_ms))
+        return results
+    
+    def _load_queries_from_file(self, query_file: str) -> List[str]:
+        """Load and filter queries from a file."""
+        query_path = os.path.join(self.config.test_queries_path, query_file)
+        with open(query_path, "r") as f:
+            queries = f.readlines()
+        
+        start_idx = self.config.query_start_index
+        end_idx = start_idx + self.config.max_queries_per_file
+        return [q.strip() for q in queries[start_idx:end_idx] if q.strip()]
+    
+    def _log_gpu_info(self, batch_size: int):
+        """Log GPU availability information."""
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if num_gpus > 1:
+            logging.info(f"Detected {num_gpus} GPUs. Batched inference will leverage multi-GPU.")
+        else:
+            logging.info(f"Using batched inference with batch size {batch_size} on single GPU/CPU")
+    
+    def _log_batch_progress(self, batch_results: List[Optional[QueryResult]], 
+                           batch_start: int, total_queries: int):
+        """Log progress for a batch of queries."""
+        for i, result in enumerate(batch_results):
+            query_idx = batch_start + i + 1
+            if result:
+                print(f"Query {query_idx}/{total_queries} - "
+                      f"Precision: {result.precision:.4f}, Recall: {result.recall:.4f}, "
+                      f"F1: {result.f1:.4f} | pred: {len(result.predicted_values)}, "
+                      f"GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms")
+    
+    def _log_summary(self, start_time: float, query_type: str):
+        """Log summary statistics after processing all queries."""
+        total_time_seconds = time.time() - start_time
+        total_queries_processed = sum(len(results) for results in self.all_results[query_type].values())
+        avg_time_per_query = total_time_seconds / total_queries_processed if total_queries_processed > 0 else 0
+        logging.info(f"Total time to process all benchmark queries: {total_time_seconds:.2f}s for {total_queries_processed} queries "
+                    f"({avg_time_per_query:.3f}s per query)")
+        print(f"\nTotal time to process all benchmark queries: {total_time_seconds:.2f}s for {total_queries_processed} queries "
+              f"({avg_time_per_query:.3f}s per query)")
+    
+    def process_queries_batched(self, model, graph_data: Any, batch_size: int = 8):
+        """Process queries in batches for parallel inference."""
+        start_time = time.time()
+        query_type = self.config.query_type
+        self.all_results[query_type] = {}
+        
+        self._log_gpu_info(batch_size)
+        
+        for query_file in self.target_queries:
+            print(f"Processing query file: {query_file}")
+            self.all_results[query_type][query_file] = []
+            
+            query_subset = self._load_queries_from_file(query_file)
+            gt_values = self.load_ground_truth()
+            
+            for batch_start in range(0, len(query_subset), batch_size):
+                batch_end = min(batch_start + batch_size, len(query_subset))
+                batch_queries = query_subset[batch_start:batch_end]
+                batch_gt = [gt_values[batch_start + i] if (batch_start + i) < len(gt_values) else [] 
+                            for i in range(len(batch_queries))]
+                
+                batch_results = self.process_batch_queries(
+                    batch_queries, model, graph_data, batch_gt, 
+                    override_confidence=self.config.confidence
+                )
+                
+                self.all_results[query_type][query_file].extend(batch_results)
+                self._log_batch_progress(batch_results, batch_start, len(query_subset))
+        
+        self._log_summary(start_time, query_type)
+    
+    def process_batch_queries(self, queries: List[str], model, graph_data: Any, 
+                              ground_truths: List[List[int]], override_confidence: float = None) -> List[Optional[QueryResult]]:
+        """Process a batch of queries together."""
+        if not queries:
+            return []
+        
+        try:
+            batch_query, batch_confidence = self._build_batch_tensor(queries, override_confidence)
+            
+            batch_start_time = time.time()
+            predicted_batch = self.run_prediction(model, batch_query, batch_confidence, graph_data)
+            batch_time_ms = (time.time() - batch_start_time) * 1000
+            
+            return self._convert_predictions_to_results(predicted_batch, ground_truths, batch_time_ms)
+            
+        except Exception as e:
+            logging.error(f"Error processing batch: {e}", exc_info=True)
+            return [None] * len(queries)
     
     def print_summary_statistics(self):
         """Print summary statistics for all processed queries."""
@@ -533,11 +657,12 @@ class CRCBenchmarkValidator:
             
             # Run prediction with configured confidence
             start_time = time.time()
-            predicted_values = self.run_prediction(
+            predicted_batch = self.run_prediction(
                 model, query_tensor, self.config.confidence, graph_data
             )
             query_time_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
-            predicted_values = self._convert_to_int_list(predicted_values)
+            # Extract single result from batch (run_prediction returns list of lists)
+            predicted_values = self._convert_to_int_list(predicted_batch[0]) if predicted_batch else []
             
             # GT already extracted above for filtering
             fnr, precision, f1 = compute_fnr_metrics([predicted_values], [ground_truth])
@@ -720,8 +845,11 @@ def main():
     
     if args_validate_crc.mode in ["benchmark", "both"]:
         logging.info("Processing benchmark queries...")
+        # Get inference batch size from args
+        inference_batch_size = getattr(inf_args, 'inference_batch_size', 1)
+        logging.info(f"Using inference batch size: {inference_batch_size}")
         # Process queries for the configured query type
-        validator.process_queries(model_factory_pipeline.model, graph_data)
+        validator.process_queries(model_factory_pipeline.model, graph_data, inference_batch_size=inference_batch_size)
     else:
         logging.info("Skipping benchmark queries (mode: calibration only)")
     

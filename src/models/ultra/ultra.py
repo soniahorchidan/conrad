@@ -40,6 +40,9 @@ class ULTRA(nn.Module, ModelUtils):
             if key != "db_controller":
                 setattr(self.args, key, value)
         self.device = device
+        self.use_multi_gpu = getattr(args, 'use_multi_gpu', True)  # Default to True
+        self.num_gpus = 0
+        self._is_parallel = False
 
         self.model = RelationProjection(
             UltraModel(
@@ -49,6 +52,33 @@ class ULTRA(nn.Module, ModelUtils):
             args.msp_threshold,
         )
         self.non_overlap_set = set()
+
+    def setup_multi_gpu(self):
+        """Setup multi-GPU support if available and enabled."""
+        if not self.use_multi_gpu:
+            self.num_gpus = 1 if torch.cuda.is_available() and self.device.startswith('cuda') else 0
+            logging.info(f"Multi-GPU disabled. Using {self.num_gpus} GPU(s).")
+            return False
+        
+        if not torch.cuda.is_available():
+            self.num_gpus = 0
+            logging.info("CUDA not available. Using CPU.")
+            return False
+    
+        
+        self.num_gpus = torch.cuda.device_count()
+        
+        if self.num_gpus > 1:
+            logging.info(f"Setting up multi-GPU support for ULTRA: {self.num_gpus} GPUs available")
+            # Wrap the model with DataParallel
+            self.model = torch.nn.DataParallel(self.model)
+            self._is_parallel = True
+            logging.info(f"ULTRA model wrapped with DataParallel. Using {self.num_gpus} GPUs for inference.")
+            return True
+        else:
+            logging.info(f"Only 1 GPU available. Using single GPU for ULTRA inference.")
+            self.num_gpus = 1
+            return False
 
     def predict(
         self, head: torch.Tensor, relation: torch.Tensor, confidence: float, graph_data
