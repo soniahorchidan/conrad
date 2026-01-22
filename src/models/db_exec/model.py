@@ -36,12 +36,12 @@ class DBExecModel(nn.Module, ModelUtils):
         # TODO(sonia): dont hardcode num edges and nodes
         self.node_degree_popularity = {
             str(i): {"popularity": random.uniform(0.5, 1.0)} 
-            for i in range(1, 14542)
+            for i in range(1, 150000)
         }
 
         self.edge_popularity_map = {
             str(i): {"popularity": random.uniform(0.5, 1.0)} 
-            for i in range(1, 1001)
+            for i in range(1, 250)
         }
 
         # Tiny epsilon fallback when popularity stats are missing
@@ -72,16 +72,6 @@ class DBExecModel(nn.Module, ModelUtils):
             confidence = 0.5 * edge_popularity + 0.5 * node_pop
             query_scores[r] = confidence
         return query_scores
-
-    @staticmethod
-    def preprocess(general_args: Namespace, args: Namespace):
-        logging.info(
-            "Skipping preprocess for DBExecModel."
-        )
-    
-    def postprocess(model, general_args: Namespace, args: Namespace):
-        pass
-
 
     def predict(
         self, query
@@ -354,9 +344,3 @@ class DBExecModel(nn.Module, ModelUtils):
         hop3_tensor = torch.stack(hop3_scores)
         
         return final_scores, hop1_tensor, hop2_tensor, hop3_tensor 
-
-    def load_all_components(self, load_path, ignore_components: list = []):
-        pass
-
-    def trainModel(self, general_args, args):
-        pass

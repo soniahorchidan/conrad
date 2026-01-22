@@ -9,7 +9,19 @@ from torch_geometric.data import Data
 from utils import get_graph
 
 
-class TrainDataset(Dataset):
+def index_to_mask(index, size):
+    index = index.view(-1)
+    size = int(index.max()) + 1 if size is None else size
+    mask = index.new_zeros(size, dtype=torch.bool)
+    mask[index] = True
+    return mask
+
+
+def collate_list(x):
+    return torch.concat([torch.from_numpy(np.array(_)) for _ in x], dim=0)
+
+
+class ValDataset(Dataset):
     def __init__(
         self,
         min_hops: int,
@@ -31,11 +43,10 @@ class TrainDataset(Dataset):
 
     def get_sample(self, idx: int):
         query = self.queries[idx]
-        tail = torch.tensor(list(self.answers[query]), dtype=torch.long)
-        tail = index_to_mask(tail, self.num_nodes).to(torch.float)
+        answers = list(self.answers[query])
         query = [[query[0]] + list(query[1])]
 
-        return query, tail
+        return query, answers
 
     def __getitem__(self, idx):
         sample = self.get_sample(idx)
@@ -43,54 +54,11 @@ class TrainDataset(Dataset):
 
     def collate_fn(self, data):
         query = collate_list([_[0] for _ in data]).squeeze(-1)
-        tail = torch.stack([_[1] for _ in data])
-
-        return query, tail, self.graph_data
-
-
-def index_to_mask(index, size):
-    index = index.view(-1)
-    size = int(index.max()) + 1 if size is None else size
-    mask = index.new_zeros(size, dtype=torch.bool)
-    mask[index] = True
-    return mask
-
-
-def collate_list(x):
-    return torch.concat([torch.from_numpy(np.array(_)) for _ in x], dim=0)
-
-
-class ValDataset(TrainDataset):
-    def __init__(
-        self,
-        min_hops: int,
-        max_hops: int,
-        queries: list,
-        answers: dict,
-        graph_data: Data,
-    ):
-        super(ValDataset, self).__init__(
-            min_hops,
-            max_hops,
-            queries,
-            answers,
-            graph_data,
-        )
-
-    def get_sample(self, idx: int):
-        query = self.queries[idx]
-        answers = list(self.answers[query])
-        query = [[query[0]] + list(query[1])]
-
-        return query, answers
-
-    def collate_fn(self, data):
-        query = collate_list([_[0] for _ in data]).squeeze(-1)
         answers = [_[1] for _ in data]
         return query, answers, self.graph_data
 
 
-class CalibDataset(TrainDataset):
+class CalibDataset(Dataset):
     def __init__(
         self,
         min_hops: int,
@@ -99,13 +67,16 @@ class CalibDataset(TrainDataset):
         answers: dict,
         graph_data: Data,
     ):
-        super(CalibDataset, self).__init__(
-            min_hops,
-            max_hops,
-            queries,
-            answers,
-            graph_data,
-        )
+        self.min_hops = min_hops
+        self.max_hops = max_hops
+        self.hop_range = list(range(min_hops, max_hops + 1))
+        self.queries = queries
+        self.answers = answers
+        self.graph_data = graph_data
+        self.num_nodes = graph_data.num_nodes
+
+    def __len__(self):
+        return len(self.queries)
 
     def get_sample(self, idx: int):
         query = self.queries[idx]
@@ -113,6 +84,10 @@ class CalibDataset(TrainDataset):
         query = [[query[0]] + list(query[1])]
 
         return query, answers
+
+    def __getitem__(self, idx):
+        sample = self.get_sample(idx)
+        return sample
 
     def collate_fn(self, data):
         query = collate_list([_[0] for _ in data]).squeeze(-1)
@@ -175,7 +150,7 @@ class DataIterator(object):
 
     def get_dataset(self, args, db_controller, mode):
         if mode == "train":
-            Dataset = TrainDataset
+            raise NotImplementedError("Training mode is not supported in inference-only mode.")
         elif mode == "val":
             Dataset = ValDataset
         elif mode == "calib":

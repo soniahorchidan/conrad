@@ -1,2 +1,4 @@
-from .model import ThreeHopPipeline, TwoUnionPipeline, TwoIntersectProjectPipeline
+from .three_hop_pipeline import ThreeHopPipeline
+from .two_union_pipeline import TwoUnionPipeline
+from .two_intersect_project_pipeline import TwoIntersectProjectPipeline
 from .dataloader import DataIterator

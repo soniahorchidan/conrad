@@ -37,7 +37,9 @@ class ModelFactory:
             raise ValueError(f"load_path must be specified. Models should be present in artifacts/snapshots")
 
         self.model = self.load_model()
-        self.model.load_all_components(self.inf_args.load_path)
+        # Load model weights if the model supports it
+        if hasattr(self.model, 'load_weights'):
+            self.model.load_weights(self.inf_args.load_path)
 
     def load_model(self):
         if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:

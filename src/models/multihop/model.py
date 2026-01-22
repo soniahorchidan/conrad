@@ -56,28 +56,18 @@ class MultiHopPredictor(nn.Module):
             neo_final = 0.5 + (torch.sqrt(neo_norm) * 0.499) 
             
             # 2. Normalize ULTRA to [0, 0.499] globally
-            # This ensures ULTRA is ALWAYS below Neo4j without needing row-wise logic
             ultra_final = ultra_scores * 0.499
             
             # 3. Combine
             unified = torch.where(neo_mask, neo_final, ultra_final)
             
-            # 4. THE CRITICAL FIX: Add infinitesimal jitter
+            # 4. add small jitter to break ties
             # This turns the 'stairs' into a 'ramp'
             # 1e-7 is large enough to break ties but too small to flip the ULTRA/Neo hierarchy
             jitter = torch.rand_like(unified) * 1e-7
             unified = torch.clamp(unified + jitter, 0, 1.0)
 
             return unified
-
-    def load_all_components(self, load_path, ignore_components: list = []):
-        if (
-            self.conformal_prediction is not None
-            and "conformal_prediction" not in ignore_components
-        ):
-            logging.info("Loading conformal prediction components...")
-            self.conformal_prediction.load_all_components(load_path)
-
 
     @torch.no_grad()
     def predict(self, head: torch.Tensor, relation: torch.Tensor, graph_data):
