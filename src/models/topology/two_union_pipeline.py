@@ -110,19 +110,19 @@ class TwoUnionPipeline(BasePipeline):
             anchor2 = query[i, 2].item()
             rel2 = query[i, 3].item()
             
-            # Branch 1: anchor1 → rel1
-            source1_tensor = torch.tensor([[anchor1]], dtype=torch.long, device=self.device)
-            rel1_tensor = torch.tensor([[rel1]], dtype=torch.long, device=self.device)
-            scores1, _ = self.unified_predictor.predict(source1_tensor, rel1_tensor, graph_data)
-            
-            # Branch 2: anchor2 → rel2
-            source2_tensor = torch.tensor([[anchor2]], dtype=torch.long, device=self.device)
-            rel2_tensor = torch.tensor([[rel2]], dtype=torch.long, device=self.device)
-            scores2, _ = self.unified_predictor.predict(source2_tensor, rel2_tensor, graph_data)
-            
             # Apply thresholds to extract nodes
             threshold1 = lamhat[0] if len(lamhat) > 0 else 0.0
             threshold2 = lamhat[1] if len(lamhat) > 1 else 0.0
+            
+            # Branch 1: anchor1 -> rel1
+            source1_tensor = torch.tensor([[anchor1]], dtype=torch.long, device=self.device)
+            rel1_tensor = torch.tensor([[rel1]], dtype=torch.long, device=self.device)
+            scores1, _ = self.unified_predictor.predict(source1_tensor, rel1_tensor, graph_data, threshold=threshold1)
+            
+            # Branch 2: anchor2 -> rel2
+            source2_tensor = torch.tensor([[anchor2]], dtype=torch.long, device=self.device)
+            rel2_tensor = torch.tensor([[rel2]], dtype=torch.long, device=self.device)
+            scores2, _ = self.unified_predictor.predict(source2_tensor, rel2_tensor, graph_data, threshold=threshold2)
             
             nodes1 = self._extract_nodes_from_scores(scores1, threshold1)
             nodes2 = self._extract_nodes_from_scores(scores2, threshold2)

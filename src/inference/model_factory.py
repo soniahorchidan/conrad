@@ -43,6 +43,7 @@ class ModelFactory:
 
     def load_model(self):
         if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
+            # Check for ultra_args.json first (standard checkpoint structure)
             if self.model_to_infer.lower() == "multihoppredictor":
                 model_args_dict_path = os.path.join(
                     self.inf_args.load_path, f"ultra_args.json"
@@ -51,8 +52,28 @@ class ModelFactory:
                 model_args_dict_path = os.path.join(
                     self.inf_args.load_path, f"{self.model_to_infer.lower()}_args.json"
                 )
-            model_args_dict = json.load(open(model_args_dict_path, "r"))
-            self.model_args = self.model_parser(args2sequence(model_args_dict))
+            
+            if os.path.exists(model_args_dict_path):
+                # Standard checkpoint with args file
+                logging.info(f"Loading model args from: {model_args_dict_path}")
+                model_args_dict = json.load(open(model_args_dict_path, "r"))
+                self.model_args = self.model_parser(args2sequence(model_args_dict))
+            else:
+                # No args file found - assume this is an official checkpoint directory (e.g., ultraquery/)
+                # Use default args or args from inf_args
+                logging.info(f"No args file found at {model_args_dict_path}, using default/model args from inf_args")
+                model_args_dict = {}
+                # Copy relevant args from inf_args if available
+                if hasattr(self.inf_args, 'msp_threshold'):
+                    model_args_dict['msp_threshold'] = self.inf_args.msp_threshold
+                if hasattr(self.inf_args, 'acceptance_threshold'):
+                    model_args_dict['acceptance_threshold'] = self.inf_args.acceptance_threshold
+                if hasattr(self.inf_args, 'batch_size'):
+                    model_args_dict['batch_size'] = self.inf_args.batch_size
+                if hasattr(self.inf_args, 'hidden_dim'):
+                    model_args_dict['hidden_dim'] = self.inf_args.hidden_dim
+                # Use defaults for other required args
+                self.model_args = self.model_parser(args2sequence(model_args_dict))
         else:
             # For pipeline models, create minimal model_args (they don't use most of it)
             # Pipeline models use inf_args directly and conformal prediction is initialized separately
@@ -79,6 +100,10 @@ class ModelFactory:
         if not hasattr(self.inf_args, 'use_multi_gpu'):
             self.inf_args.use_multi_gpu = True
         self.model_args.use_multi_gpu = self.inf_args.use_multi_gpu
+        
+        # Pass msp_threshold from inf_args if available (important for UltraQuery checkpoints)
+        if hasattr(self.inf_args, 'msp_threshold'):
+            self.model_args.msp_threshold = self.inf_args.msp_threshold
 
         if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
             # Load ULTRA model (once)

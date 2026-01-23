@@ -27,6 +27,8 @@ def parse_args(args_list=None):
     # GNNs trained on link prediction exhibit the multi-source propagation issue (see the paper)
     # We can partly alleviate it by thresholding intermediate scores
     # Specific to ULTRA implementation. Should not touch it if you don't know what you are doing
+    # Note: For official UltraQuery checkpoints (ultraquery.pth), set this to 0.0
+    # For vanilla ULTRA checkpoints (ultra_3g.pth, ultra_4g.pth, ultra_50g.pth), use 0.8 or higher
     parser.add_argument("--msp_threshold", default=0.0, type=float)
     parser.add_argument("--acceptance_threshold", default=0.7, type=float)
 

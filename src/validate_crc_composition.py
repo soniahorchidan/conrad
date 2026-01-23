@@ -737,6 +737,14 @@ def main():
         choices=["fb15k-237", "nell-955"],
         help="Dataset name: fb15k-237 or nell-955 (required for dataset-specific calibration data)"
     )
+    parser_validate_crc.add_argument(
+        "--use-ultraquery", action="store_true", default=False,
+        help="Use the official UltraQuery checkpoint (ultraquery.pth) instead of dataset-specific models"
+    )
+    parser_validate_crc.add_argument(
+        "--load-path", type=str, default=None,
+        help="Override load_path to use a specific checkpoint file or directory (e.g., path to ultraquery.pth)"
+    )
     args_validate_crc, remaining_args = parser_validate_crc.parse_known_args()
     
     # Validate dataset is provided
@@ -761,7 +769,30 @@ def main():
     )
     
     # Update load_path based on dataset to use dataset-specific model
-    if args_validate_crc.dataset:
+    # Priority: 1) --load-path override, 2) --use-ultraquery flag, 3) dataset-specific model
+    if args_validate_crc.load_path:
+        # User explicitly specified load_path, use it
+        inf_args.load_path = args_validate_crc.load_path
+        logging.info(f"Using user-specified load_path: {inf_args.load_path}")
+    elif args_validate_crc.use_ultraquery:
+        # Use the official UltraQuery checkpoint
+        # Set load_path to the parent directory (not the .pth file itself)
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        ultraquery_dir = os.path.join(root_dir, "artifacts", "snapshots", "ultraquery")
+        
+        if not os.path.exists(ultraquery_dir):
+            logging.error(f"UltraQuery directory not found at: {ultraquery_dir}")
+            logging.error("Please ensure artifacts/snapshots/ultraquery/ exists or use --load-path to specify the checkpoint location")
+            sys.exit(1)
+        
+        inf_args.load_path = ultraquery_dir
+        logging.info(f"Using UltraQuery checkpoint directory: {inf_args.load_path}")
+        
+        # Ensure msp_threshold is set to 0.0 for UltraQuery. Requirement from the original UltraQuery paper.
+        if not hasattr(inf_args, 'msp_threshold') or inf_args.msp_threshold != 0.0:
+            logging.info("Setting msp_threshold=0.0 for UltraQuery checkpoint")
+            inf_args.msp_threshold = 0.0
+    elif args_validate_crc.dataset:
         # Map dataset names to model snapshot directories
         dataset_to_model_path = {
             "fb15k-237": "ultra_fb15k237",

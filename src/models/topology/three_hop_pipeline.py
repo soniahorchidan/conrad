@@ -129,15 +129,16 @@ class ThreeHopPipeline(BasePipeline):
         batch_size = query.shape[0]
         all_nodes, all_scores = [], []
         
+        threshold = self._get_threshold(lamhat, 0)
+        
         for i in range(batch_size):
             source = query[i, 0].item()
             relation = query[i, 1].item()
             
             source_tensor = torch.tensor([[source]], dtype=torch.long, device=self.device)
             rel_tensor = torch.tensor([[relation]], dtype=torch.long, device=self.device)
-            scores, _ = self.unified_predictor.predict(source_tensor, rel_tensor, graph_data)
+            scores, _ = self.unified_predictor.predict(source_tensor, rel_tensor, graph_data, threshold=threshold)
             
-            threshold = self._get_threshold(lamhat, 0)
             nodes = self._extract_nodes_from_scores(scores, threshold)
             
             if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, i, 1):
@@ -197,6 +198,7 @@ class ThreeHopPipeline(BasePipeline):
         
         return {"nodes": all_nodes, "scores": all_scores, "path_aware": True}
     
+    # TODO(sonia): simplify this method. I remember some process_hop_* methods that might contain similar logic.
     def _process_hop_generic(self, hop_num: int, source_nodes: List[int], relation: int, 
                             query_idx: int, lamhat: List[float], graph_data: Any,
                             ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
@@ -206,6 +208,7 @@ class ThreeHopPipeline(BasePipeline):
             return [], [], set()
         
         path_scores, score_tensors = [], []
+        threshold = self._get_threshold(lamhat, hop_num - 1)
         
         # Process sources in chunks to avoid GPU OOM
         for chunk_start in range(0, len(source_nodes), self.max_internal_batch):
@@ -213,7 +216,7 @@ class ThreeHopPipeline(BasePipeline):
             
             batch_source = torch.tensor([[s] for s in chunk_nodes], dtype=torch.long, device=self.device)
             batch_rel = torch.tensor([[relation]] * len(chunk_nodes), dtype=torch.long, device=self.device)
-            batch_scores, _ = self.unified_predictor.predict(batch_source, batch_rel, graph_data)
+            batch_scores, _ = self.unified_predictor.predict(batch_source, batch_rel, graph_data, threshold=threshold)
             
             for idx, source in enumerate(chunk_nodes):
                 scores = batch_scores[idx:idx+1]

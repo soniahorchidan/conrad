@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from argparse import Namespace
+from typing import Optional
 import logging
 
 
@@ -52,10 +53,17 @@ class MultiHopPredictor(nn.Module):
             return unified
 
     @torch.no_grad()
-    def predict(self, head: torch.Tensor, relation: torch.Tensor, graph_data):
+    def predict(self, head: torch.Tensor, relation: torch.Tensor, graph_data, threshold: Optional[float] = None):
         """
         Runtime scoring-only path that returns ids above a given threshold.
         This mirrors your ULTRA.predict style but uses the unified score.
+        
+        Args:
+            head: Head entity tensor
+            relation: Relation tensor
+            graph_data: Graph data for ULTRA model
+            threshold: Optional threshold value. If > 0.5, Ultra inference is skipped
+                      since all Ultra scores are < 0.5 and won't pass the threshold.
         """
         query = torch.cat([head, relation], dim=-1)
     
@@ -64,7 +72,33 @@ class MultiHopPredictor(nn.Module):
         else:
             results, scores = self.neo4j.predict(query)
 
-        ultra_raw = self.ultra.forward(graph_data, query)          # [B, V]
+        # Optimization: Skip Ultra inference if threshold > 0.5
+        # Since Neo4j scores are in [0.5, 1.0] and Ultra scores are in [0, 0.499],
+        # if threshold > 0.5, only Neo4j predictions will pass the threshold.
+        skip_ultra = threshold is not None and threshold > 0.5
+        
+        if skip_ultra:
+            # We need to get V (vocabulary size) to create ultra_raw with correct shape
+            # First, try to get it from graph_data if available
+            if hasattr(graph_data, 'num_nodes'):
+                V = graph_data.num_nodes
+            elif hasattr(graph_data, 'x') and graph_data.x is not None:
+                V = graph_data.x.shape[0]
+            else:
+                # Fallback: infer from results or use default
+                # Estimate V from the max entity ID in results, with a reasonable minimum
+                if results and any(results):
+                    max_entity = max([max(r) if r else 0 for r in results])
+                    V = max(max_entity + 1, 14541)  # At least default for fb15k-237
+                else:
+                    V = 14541  # Default entity count for fb15k-237
+            
+            B = query.shape[0]
+            ultra_raw = torch.zeros((B, V), device=self.device)
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f"Skipping Ultra inference for threshold {threshold:.4f} > 0.5 (V={V})")
+        else:
+            ultra_raw = self.ultra.forward(graph_data, query)          # [B, V]
         
         B, V = ultra_raw.size()
         prob = torch.zeros((B, V), device=ultra_raw.device)

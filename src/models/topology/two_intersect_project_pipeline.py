@@ -79,19 +79,19 @@ class TwoIntersectProjectPipeline(BasePipeline):
             anchor2, rel2 = query[i, 2].item(), query[i, 3].item()
             rel3 = query[i, 4].item()
             
-            # 1. Branch Execution
-            source1_t = torch.tensor([[anchor1]], dtype=torch.long, device=self.device)
-            rel1_t = torch.tensor([[rel1]], dtype=torch.long, device=self.device)
-            scores1, _ = self.unified_predictor.predict(source1_t, rel1_t, graph_data)
-            
-            source2_t = torch.tensor([[anchor2]], dtype=torch.long, device=self.device)
-            rel2_t = torch.tensor([[rel2]], dtype=torch.long, device=self.device)
-            scores2, _ = self.unified_predictor.predict(source2_t, rel2_t, graph_data)
-            
             # 2. Independent Branch Thresholding (3D optimization)
             t_branch1 = lamhat[0] if len(lamhat) > 0 else 0.0
             t_branch2 = lamhat[1] if len(lamhat) > 1 else 0.0
             t_proj = lamhat[2] if len(lamhat) > 2 else 0.0
+            
+            # 1. Branch Execution
+            source1_t = torch.tensor([[anchor1]], dtype=torch.long, device=self.device)
+            rel1_t = torch.tensor([[rel1]], dtype=torch.long, device=self.device)
+            scores1, _ = self.unified_predictor.predict(source1_t, rel1_t, graph_data, threshold=t_branch1)
+            
+            source2_t = torch.tensor([[anchor2]], dtype=torch.long, device=self.device)
+            rel2_t = torch.tensor([[rel2]], dtype=torch.long, device=self.device)
+            scores2, _ = self.unified_predictor.predict(source2_t, rel2_t, graph_data, threshold=t_branch2)
             
             # Apply thresholds independently to each branch
             branch1_nodes = self._extract_nodes_from_scores(scores1, t_branch1)
@@ -131,7 +131,7 @@ class TwoIntersectProjectPipeline(BasePipeline):
                     int_tensor = torch.tensor(b_nodes, dtype=torch.long, device=self.device).unsqueeze(1)
                     rel3_tensor = torch.tensor([[rel3]] * len(b_nodes), dtype=torch.long, device=self.device)
                     
-                    p_scores, _ = self.unified_predictor.predict(int_tensor, rel3_tensor, graph_data)
+                    p_scores, _ = self.unified_predictor.predict(int_tensor, rel3_tensor, graph_data, threshold=t_proj)
                     
                     for j, parent_id in enumerate(b_nodes):
                         s_vec = p_scores[j].cpu()

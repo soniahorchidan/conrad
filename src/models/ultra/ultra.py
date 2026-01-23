@@ -65,7 +65,6 @@ class ULTRA(nn.Module, ModelUtils):
             logging.info("CUDA not available. Using CPU.")
             return False
     
-        
         self.num_gpus = torch.cuda.device_count()
         
         if self.num_gpus > 1:
@@ -128,13 +127,40 @@ class ULTRA(nn.Module, ModelUtils):
         return all_results, error_intervals
 
     def load_weights(self, load_path: str):
-        """Load ULTRA model weights from the specified path."""
+        """Load ULTRA model weights from the specified path.
+        
+        Supports both custom checkpoints and official ULTRA/UltraQuery checkpoints.
+        Handles different checkpoint formats:
+        - Direct state dict (.pth file with state_dict)
+        - Checkpoint dict with 'model' or 'state_dict' keys
+        - DataParallel wrapped checkpoints (strips 'module.' prefix)
+        
+        Examples:
+        - Official UltraQuery checkpoint: load_path="/path/to/ultraquery/" (looks for ultraquery.pth in that directory)
+          (Set msp_threshold=0.0 in args for UltraQuery checkpoints)
+        - Official ULTRA checkpoint: load_path="/path/to/checkpoint_dir/" (looks for .pth files in that directory)
+          (Set msp_threshold=0.8 or higher for vanilla ULTRA checkpoints)
+        - Custom checkpoint: load_path="/path/to/checkpoint_dir" (looks for ultra/main.pth)
+        """
         logging.info("Loading ULTRA model weights...")
         if load_path.endswith(".pth"):
-            # If the path is a file, we assume it's the main model weights
+            # If the path is a file, we assume it's the main model weights (backward compatibility)
             main_path = load_path
-        else:
+        elif os.path.exists(os.path.join(load_path, "ultra", "main.pth")):
+            # Standard checkpoint structure: ultra/main.pth
             main_path = os.path.join(load_path, "ultra", "main.pth")
+        else:
+            # Look for .pth files in the directory (e.g., ultraquery.pth, ultra_4g.pth)
+            pth_files = [f for f in os.listdir(load_path) if f.endswith(".pth")]
+            if not pth_files:
+                raise FileNotFoundError(
+                    f"No checkpoint file found in {load_path}.\n"
+                    f"Expected either: ultra/main.pth or a .pth file (e.g., ultraquery.pth)"
+                )
+            if len(pth_files) > 1:
+                logging.warning(f"Multiple .pth files found in {load_path}: {pth_files}. Using {pth_files[0]}")
+            main_path = os.path.join(load_path, pth_files[0])
+            logging.info(f"Found checkpoint file: {main_path}")
         
         # Validate file exists and has content
         if not os.path.exists(main_path):
@@ -153,8 +179,80 @@ class ULTRA(nn.Module, ModelUtils):
             )
         
         try:
-            self.load_state_dict(torch.load(main_path, map_location=self.device))
-            logging.info("Successfully loaded ULTRA model weights")
+            checkpoint = torch.load(main_path, map_location=self.device)
+            
+            # Handle different checkpoint formats
+            if isinstance(checkpoint, dict):
+                # Check if it's a checkpoint dict with nested state_dict
+                if 'model' in checkpoint:
+                    state_dict = checkpoint['model']
+                    logging.info("Found checkpoint with 'model' key, extracting state dict")
+                elif 'state_dict' in checkpoint:
+                    state_dict = checkpoint['state_dict']
+                    logging.info("Found checkpoint with 'state_dict' key, extracting state dict")
+                elif 'model_state_dict' in checkpoint:
+                    state_dict = checkpoint['model_state_dict']
+                    logging.info("Found checkpoint with 'model_state_dict' key, extracting state dict")
+                else:
+                    # Assume it's already a state dict
+                    state_dict = checkpoint
+            else:
+                state_dict = checkpoint
+            
+            # Remove DataParallel wrapper if present (strips 'module.' prefix)
+            if any(key.startswith('module.') for key in state_dict.keys()):
+                logging.info("Detected DataParallel wrapper, removing 'module.' prefix")
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    new_key = key.replace('module.', '', 1)  # Remove first occurrence only
+                    new_state_dict[new_key] = value
+                state_dict = new_state_dict
+            
+            # Try to load the state dict
+            try:
+                missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+                if missing_keys:
+                    logging.warning(f"Missing keys when loading checkpoint: {missing_keys[:5]}..." 
+                                  if len(missing_keys) > 5 else f"Missing keys: {missing_keys}")
+                if unexpected_keys:
+                    logging.warning(f"Unexpected keys in checkpoint: {unexpected_keys[:5]}..." 
+                                  if len(unexpected_keys) > 5 else f"Unexpected keys: {unexpected_keys}")
+                logging.info("Successfully loaded ULTRA model weights")
+            except RuntimeError as e:
+                # If strict loading fails, try to match keys more flexibly
+                logging.warning(f"Strict loading failed: {str(e)}")
+                logging.info("Attempting flexible key matching...")
+                
+                # Get model state dict keys
+                model_keys = set(self.state_dict().keys())
+                checkpoint_keys = set(state_dict.keys())
+                
+                # Try to find matching keys (handle common prefix differences)
+                matched_state_dict = {}
+                for ckpt_key in checkpoint_keys:
+                    # Try exact match first
+                    if ckpt_key in model_keys:
+                        matched_state_dict[ckpt_key] = state_dict[ckpt_key]
+                    else:
+                        # Try removing common prefixes
+                        for prefix in ['model.', 'ultra.', '']:
+                            stripped_key = ckpt_key.replace(prefix, '', 1) if prefix else ckpt_key
+                            if stripped_key in model_keys:
+                                matched_state_dict[stripped_key] = state_dict[ckpt_key]
+                                logging.debug(f"Mapped checkpoint key '{ckpt_key}' -> '{stripped_key}'")
+                                break
+                
+                if matched_state_dict:
+                    self.load_state_dict(matched_state_dict, strict=False)
+                    logging.info(f"Successfully loaded {len(matched_state_dict)}/{len(checkpoint_keys)} weights with flexible matching")
+                else:
+                    raise RuntimeError(
+                        f"Could not match any checkpoint keys to model keys.\n"
+                        f"Model keys (first 10): {list(model_keys)[:10]}\n"
+                        f"Checkpoint keys (first 10): {list(checkpoint_keys)[:10]}\n"
+                        f"Please check that the checkpoint matches the model architecture."
+                    )
+                    
         except EOFError as e:
             raise EOFError(
                 f"Failed to load checkpoint - file appears corrupted or truncated.\n"
@@ -162,6 +260,12 @@ class ULTRA(nn.Module, ModelUtils):
                 f"Size: {file_size} bytes\n"
                 f"Original error: {str(e)}\n"
                 f"You may need to re-train or re-download the model checkpoint."
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load checkpoint from {main_path}.\n"
+                f"Error: {str(e)}\n"
+                f"Please ensure the checkpoint is compatible with this model architecture."
             ) from e
 
     def forward(self, graph_data, query, return_intermediate=False):
