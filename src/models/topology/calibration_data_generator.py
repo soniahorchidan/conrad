@@ -602,6 +602,10 @@ class CalibrationDataGenerator:
             indices_tensor = torch.tensor([idx for idx, _ in sorted_items], dtype=torch.long)
             values_tensor = torch.tensor([val for _, val in sorted_items], dtype=torch.float32)
         
+        # Move to CPU immediately to free GPU memory
+        indices_tensor = indices_tensor.cpu()
+        values_tensor = values_tensor.cpu()
+        
         return {
             'indices': indices_tensor,
             'values': values_tensor,

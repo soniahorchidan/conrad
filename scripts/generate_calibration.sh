@@ -11,13 +11,14 @@ log() {
     echo -e "${yellow}[$(date '+%Y-%m-%d %H:%M:%S')][${level}]: ${msg}${reset}"
 }
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Get the absolute path of the script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_SCRIPT="${REPO_ROOT}/build.sh"
 
 # Parse command line arguments
 DATASET=""
 DELETE_EDGES_PERC=""
-CONFIG_FILE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -30,10 +31,6 @@ while [[ $# -gt 0 ]]; do
             DELETE_EDGES_PERC="$2"
             shift 2
             ;;
-        --config)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
         *)
             log ERROR "Unknown argument: $1"
             exit 1
@@ -44,44 +41,64 @@ done
 # Validate mandatory arguments
 if [ -z "${DELETE_EDGES_PERC}" ]; then
     log ERROR "Missing required argument: --delete-edges-perc"
-    log ERROR "Usage: $0 --delete-edges-perc <percentage> --dataset <dataset> [--config <config_file>]"
-    log ERROR "Supported datasets: fb15k-237, nell-955"
+    log ERROR "Usage: $0 --delete-edges-perc <percentage> --dataset <dataset>"
+    log ERROR "Supported datasets: fb15k-237, nell-955, yago310"
     exit 1
 fi
 
 if [ -z "${DATASET}" ]; then
     log ERROR "Missing required argument: --dataset"
-    log ERROR "Usage: $0 --delete-edges-perc <percentage> --dataset <dataset> [--config <config_file>]"
-    log ERROR "Supported datasets: fb15k-237, nell-955"
+    log ERROR "Usage: $0 --delete-edges-perc <percentage> --dataset <dataset>"
+    log ERROR "Supported datasets: fb15k-237, nell-955, yago310"
     exit 1
 fi
 
 # Validate dataset name
-if [ "${DATASET}" != "fb15k-237" ] && [ "${DATASET}" != "nell-955" ]; then
+if [ "${DATASET}" != "fb15k-237" ] && [ "${DATASET}" != "nell-955" ] && [ "${DATASET}" != "yago310" ]; then
     log ERROR "Unsupported dataset: ${DATASET}"
-    log ERROR "Supported datasets: fb15k-237, nell-955"
+    log ERROR "Supported datasets: fb15k-237, nell-955, yago310"
     exit 1
 fi
 
 log INFO "Using dataset: ${DATASET}"
+
+# Check if dataset files exist, and prepare if needed
+DATA_PATH="${REPO_ROOT}/artifacts/data"
+DATASET_DATA_DIR="${DATA_PATH}/${DATASET}"
+NODE_FILE="${DATASET_DATA_DIR}/neo4j_train_ind_ent.csv"
+REL_FILE="${DATASET_DATA_DIR}/neo4j_train_ind_rels.csv"
+
+if [ ! -f "${NODE_FILE}" ] || [ ! -f "${REL_FILE}" ]; then
+    log INFO "Dataset files not found. Preparing dataset..."
+    case "${DATASET}" in
+        yago310)
+            python3 "${REPO_ROOT}/scripts/prepare_yago310.py"
+            ;;
+        fb15k-237|nell-955)
+            log ERROR "Dataset files not found for ${DATASET}"
+            log ERROR "Please ensure the dataset files are available at ${DATASET_DATA_DIR}/"
+            log ERROR "For yago310, you can run: ./build.sh prepare_dataset yago310"
+            exit 1
+            ;;
+        *)
+            log ERROR "Unknown dataset: ${DATASET}"
+            exit 1
+            ;;
+    esac
+    
+    # Verify files were created
+    if [ ! -f "${NODE_FILE}" ] || [ ! -f "${REL_FILE}" ]; then
+        log ERROR "Failed to prepare dataset files"
+        exit 1
+    fi
+    log INFO "Dataset preparation complete"
+fi
 
 NEO4J_USER="${NEO4J_USER:-neo4j}"
 NEO4J_PASSWORD="${NEO4J_PASSWORD:-password123}"
 NEO4J_DB="${NEO4J_DB:-neo4j}"
 
 CYPHER_SHELL_BASE=(cypher-shell -u "${NEO4J_USER}" -p "${NEO4J_PASSWORD}" -d "${NEO4J_DB}")
-
-# Create temporary config file for Neo4j import (build.sh needs it)
-TMP_CONFIG=$(mktemp)
-cat > "${TMP_CONFIG}" <<EOF
-{
-  "core": {
-    "dataset": "${DATASET}"
-  }
-}
-EOF
-CONFIG_FILE="${TMP_CONFIG}"
-log INFO "Created temporary config file for Neo4j import"
 
 # Normalize dataset name for folder names (remove hyphens)
 # e.g., "fb15k-237" -> "fb15k237", "nell-955" -> "nell955"
@@ -169,7 +186,7 @@ echo "MATCH (n) DETACH DELETE n;" | "${CYPHER_SHELL_BASE[@]}"
 stop_neo4j
 
 log INFO "Importing fresh dataset into Neo4j"
-"${BUILD_SCRIPT}" neo4j import "${CONFIG_FILE}" --without-docker
+"${BUILD_SCRIPT}" neo4j import "${DATASET}" --without-docker
 
 start_neo4j
 
@@ -200,14 +217,9 @@ python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
     --calib-path "${CALIBRATION_BASE_DIR}"
 
 log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
-python3 "${REPO_ROOT}/benchmark/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"
+python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"
 
 log INFO "Calibration generation pipeline completed successfully"
 log INFO "Generated calibration and test queries:"
 log INFO "  - calibration: ${CALIBRATION_BASE_DIR}"
 log INFO "  - test: ${TEST_BASE_DIR}"
-
-# Clean up temporary config file if we created one
-if [ -n "${TMP_CONFIG:-}" ] && [ -f "${TMP_CONFIG}" ]; then
-    rm -f "${TMP_CONFIG}"
-fi

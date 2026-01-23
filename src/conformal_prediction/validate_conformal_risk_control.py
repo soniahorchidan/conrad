@@ -9,6 +9,10 @@ DATASET_STATISTICS = {
         "num_entities": 75494,  # From terminal output: "75494 nodes"
         "num_relations": 955,   # Original relations (1910 with inverse edges if added)
     },
+    "yago310": {
+        "num_entities": 123182,  # YAGO3-10 dataset
+        "num_relations": 37,      # Original relations (74 with inverse edges if added)
+    },
 }
 
 
@@ -17,7 +21,7 @@ def get_dataset_statistics(dataset: str):
     Get dataset statistics (num_entities, num_relations) for a given dataset.
     
     Args:
-        dataset: Dataset name (e.g., "fb15k-237", "nell-955")
+        dataset: Dataset name (e.g., "fb15k-237", "nell-955", "yago310")
     
     Returns:
         dict with "num_entities" and "num_relations" keys

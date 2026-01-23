@@ -75,16 +75,17 @@ import pickle
 from argparse import Namespace, ArgumentParser
 
 # Add the src directory to the path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, src_dir)
 
 from graph_handler.backend_db.neo4j.controller import Neo4JBackendDBController
 from utils import get_graph
 import time
 
-# Import query generators
-from .sampler_3p import generate_3p_queries, build_ent_out_structure
-from .sampler_2ip import generate_2ip_queries
-from .sampler_2u import generate_2u_queries
+# Import query generators - use absolute imports since we're running as a script
+from sampler.sampler_3p import generate_3p_queries, build_ent_out_structure
+from sampler.sampler_2ip import generate_2ip_queries
+from sampler.sampler_2u import generate_2u_queries
 import random
 
 

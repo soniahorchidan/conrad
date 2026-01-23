@@ -84,7 +84,7 @@ class VectorConformalRiskControl:
         return hashlib.md5(config_str.encode()).hexdigest()
 
     def prepare_data(self, save_path: str, db_controller: Any, 
-                    calibration_data_path: Optional[str] = None) -> None:
+                    calibration_data_path: Optional[str] = None) -> bool:
         """
         Prepare calibration data with caching support.
         
@@ -92,11 +92,14 @@ class VectorConformalRiskControl:
             save_path: Path to save data
             db_controller: Database controller
             calibration_data_path: Optional path to saved calibration data
+            
+        Returns:
+            bool: True if data was loaded from cache, False if new data was generated
         """
         logging.info("Attempting to load calibration data from cache...")
         if self.data_manager.load_cached_calibration_data(self._config_hash, "default"):
             logging.info("Successfully loaded calibration data from cache")
-            return
+            return True
         
         # Generate new calibration data
         if calibration_data_path is not None:
@@ -115,10 +118,7 @@ class VectorConformalRiskControl:
         cal_scores, true_labels, cal_queries = full_calib_data
         self.data_manager.set_calibration_data(cal_scores, true_labels, cal_queries)
         
-        # Save to cache if we have a load path
-        if self.data_manager.load_path is not None:
-            logging.info("Saving calibration data to cache...")
-            self.data_manager.save_calibration_data_cache(self._config_hash, "default")
+        return False
 
     def calibrate(self) -> Dict[str, Any]:
         """
@@ -150,7 +150,12 @@ class VectorConformalRiskControl:
             Calibration metadata
         """
         logging.info("Starting prepare_calibrate...")
-        self.prepare_data(save_path, db_controller, calibration_data_path)
+        data_loaded_from_cache = self.prepare_data(save_path, db_controller, calibration_data_path)
+        
+        # Save to cache right before calibration starts (only if we generated new data)
+        if not data_loaded_from_cache and self.data_manager.load_path is not None:
+            logging.info("Saving calibration data to cache...")
+            self.data_manager.save_calibration_data_cache(self._config_hash, "default")
         
         logging.info(f"Preparing to calibrate model {self.model_name}")
         metadata = self.calibrate()

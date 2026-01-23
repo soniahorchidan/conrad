@@ -211,5 +211,6 @@ __marimo__/
 artifacts/databases/
 artifacts/snapshots/
 artifacts/inference_logs/
+artifacts/data/yago310/
 queries/
 external/

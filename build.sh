@@ -106,12 +106,44 @@ prepare_neo4j() {
 # This function can ONLY be used in combination with the orb_dependency NEO4J instance.
 # This is especially used in the the CI.
 import_neo4j() {
-    local dataset
-    dataset=$(jq -r '.core.dataset' "$1")
+    local dataset="$1"
+    
+    if [ -z "$dataset" ]; then
+        echo "Error: Dataset name is required"
+        echo "Usage: $0 neo4j import <dataset> [--without-docker]"
+        exit 1
+    fi
 
     # Check if Neo4j is running
     if neo4j status | grep -q "running"; then
         echo "Error: Neo4j is currently running. Please stop the service before importing the dataset."
+        exit 1
+    fi
+
+    # Validate that required data files exist
+    local node_header_file="$DATA_PATH/$dataset/neo4j_train_ind_ent_header.csv"
+    local node_file="$DATA_PATH/$dataset/neo4j_train_ind_ent.csv"
+    local rel_header_file="$DATA_PATH/$dataset/neo4j_train_ind_rels_header.csv"
+    local rel_file="$DATA_PATH/$dataset/neo4j_train_ind_rels.csv"
+
+    if [ ! -f "$node_header_file" ]; then
+        echo "Error: Required file not found: $node_header_file"
+        echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        exit 1
+    fi
+    if [ ! -f "$node_file" ]; then
+        echo "Error: Required file not found: $node_file"
+        echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        exit 1
+    fi
+    if [ ! -f "$rel_header_file" ]; then
+        echo "Error: Required file not found: $rel_header_file"
+        echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        exit 1
+    fi
+    if [ ! -f "$rel_file" ]; then
+        echo "Error: Required file not found: $rel_file"
+        echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
         exit 1
     fi
 
@@ -123,8 +155,8 @@ import_neo4j() {
     # This is necessary to create an isolated environment for the CI
     # Check issues: https://github.com/orbdb/orb/pull/623 and https://github.com/orbdb/orb/issues/587.
     change_neo4j_database_path
-    neo4j-admin database import full --nodes "$(pwd)/$DATA_PATH/$dataset/neo4j_train_ind_ent_header.csv,$(pwd)/$DATA_PATH/$dataset/neo4j_train_ind_ent.csv" \
-                                     --relationships "$(pwd)/$DATA_PATH/$dataset/neo4j_train_ind_rels_header.csv,$(pwd)/$DATA_PATH/$dataset/neo4j_train_ind_rels.csv" \
+    neo4j-admin database import full --nodes "$(pwd)/$node_header_file,$(pwd)/$node_file" \
+                                     --relationships "$(pwd)/$rel_header_file,$(pwd)/$rel_file" \
                                      --overwrite-destination
 
     echo "========== Import $dataset into Neo4j...done."
@@ -180,7 +212,6 @@ change_neo4j_database_path() {
 
 case $1 in
     neo4j)
-        orb_config_file=$(get_orb_config "$3")
         WITHOUT_DOCKER=false
         # determine by if user specified `--without-docker`
         if [[ "$*" == *"--without-docker"* ]]; then
@@ -201,7 +232,20 @@ case $1 in
         elif [[ "$2" == "import" ]]; then
             if [ "$WITHOUT_DOCKER" = true ]; then
                 # Only used in combination with orb_dependency neo4j instance.
-                import_neo4j "$orb_config_file"
+                # Get dataset name from command line arguments (first non-flag argument after "import")
+                dataset=""
+                # Find first non-flag argument (dataset name) - check $3 and $4
+                if [ -n "$3" ] && [[ "$3" != "--without-docker" ]] && [[ ! "$3" =~ ^-- ]]; then
+                    dataset="$3"
+                elif [ -n "$4" ] && [[ "$4" != "--without-docker" ]] && [[ ! "$4" =~ ^-- ]]; then
+                    dataset="$4"
+                fi
+                if [ -z "$dataset" ]; then
+                    echo "Error: Dataset name is required"
+                    echo "Usage: $0 neo4j import <dataset> [--without-docker]"
+                    exit 1
+                fi
+                import_neo4j "$dataset"
             else
                 echo "Error: Docker import not supported in conrad. Use --without-docker"
                 exit 1
@@ -229,7 +273,7 @@ Setup Neo4j if not using Docker:
 Install Python dependencies:
 > $0 install_deps cpu|cuda
 
-Imports dataset (Note: The dataset name is specified in the config file (config.json), overwrites existing data):
+Imports dataset (Note: The dataset name is passed as an argument, overwrites existing data):
 (Specify --without-docker to use Neo4j orb_dependency instance)
 > $0 neo4j import [--without-docker]
 

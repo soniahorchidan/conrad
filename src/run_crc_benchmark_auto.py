@@ -306,15 +306,15 @@ def main():
     parser.add_argument("--max-eval-queries", type=int, default=1000,
                        help="Maximum number of test queries to evaluate (default: 1000)")
     parser.add_argument("--dataset", type=str, default=None,
-                       choices=["fb15k-237", "nell-955"],
-                       help="Dataset name: fb15k-237 or nell-955 (required for dataset-specific calibration data)")
+                       choices=["fb15k-237", "nell-955", "yago310"],
+                       help="Dataset name: fb15k-237, nell-955, or yago310 (required for dataset-specific calibration data)")
     
     # Parse known args and collect any extra args to pass through
     args, extra_args = parser.parse_known_args()
     
     # Validate dataset is provided
     if args.dataset is None:
-        parser.error("--dataset argument is required. Supported datasets: fb15k-237, nell-955")
+        parser.error("--dataset argument is required. Supported datasets: fb15k-237, nell-955, yago310")
     
     # Set output directory
     if args.output_dir is None:

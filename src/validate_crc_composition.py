@@ -28,7 +28,7 @@ class BenchmarkConfig:
     query_start_index: int = 0
     calibration_threshold: float = 0.7
     
-    # Dataset name (e.g., "fb15k-237" or "nell-955")
+    # Dataset name (e.g., "fb15k-237", "nell-955", or "yago310")
     dataset: str = None
     
     # Base directories - will be constructed based on dataset
@@ -734,8 +734,8 @@ def main():
     )
     parser_validate_crc.add_argument(
         "--dataset", type=str, default=None, 
-        choices=["fb15k-237", "nell-955"],
-        help="Dataset name: fb15k-237 or nell-955 (required for dataset-specific calibration data)"
+        choices=["fb15k-237", "nell-955", "yago310"],
+        help="Dataset name: fb15k-237, nell-955, or yago310 (required for dataset-specific calibration data)"
     )
     parser_validate_crc.add_argument(
         "--use-ultraquery", action="store_true", default=False,
@@ -749,7 +749,7 @@ def main():
     
     # Validate dataset is provided
     if args_validate_crc.dataset is None:
-        logging.error("--dataset argument is required. Supported datasets: fb15k-237, nell-955")
+        logging.error("--dataset argument is required. Supported datasets: fb15k-237, nell-955, yago310")
         sys.exit(1)
 
     inf_args = merge_args(
@@ -796,7 +796,8 @@ def main():
         # Map dataset names to model snapshot directories
         dataset_to_model_path = {
             "fb15k-237": "ultra_fb15k237",
-            "nell-955": "ultra_nell955"
+            "nell-955": "ultra_nell955",
+            "yago310": "ultra_yago310" # but will most likely use ultraquery.pth
         }
         
         if args_validate_crc.dataset in dataset_to_model_path:
@@ -846,6 +847,7 @@ def main():
     logging.info(f"Test queries path: {config.test_queries_path}")
     validator = CRCBenchmarkValidator(config)
     
+    # TODO(sonia): get them from neo4j??
     # Get dataset statistics and update model args
     dataset_stats = get_dataset_statistics(args_validate_crc.dataset)
     inf_args.num_entities = dataset_stats["num_entities"]
