@@ -2,13 +2,14 @@
 """
 Run baseline benchmarks for comparison with ThreeHopPipeline results.
 
-Two baselines:
-1. DBExecModel (Neo4j symbolic execution) - runs full 3-hop query in Neo4j
-2. Ultra with static threshold (neural) - runs 3 separate hops with static threshold (e.g., 0.75)
+Three baselines:
+1. DBExecModel (Neo4j symbolic execution) - runs full query in Neo4j
+2. Ultra with static threshold (neural) - runs hops with static threshold (e.g., 0.75)
+3. Hybrid (neural + symbolic) with static thresholds - uses MultiHopPredictor with static thresholds
 
 This script:
 - Loads the same benchmark queries as run_crc_benchmark_auto.py
-- Runs both baselines
+- Runs selected baselines
 - Collects precision, recall, F1, and execution time
 - Saves results in a format comparable to results_summary.csv
 """
@@ -87,11 +88,12 @@ class BaselineRunner:
         # Results storage
         self.results = {
             'neo4j_symbolic': [],
-            'ultra_neural': []
+            'ultra_neural': [],
+            'hybrid_static': []
         }
         
         # Store threshold for reporting
-        self.ultra_threshold = None
+        self.threshold = None
         
         # Cache for Ultra scores (to avoid recomputing inference for multiple thresholds)
         self.ultra_scores_cache = None
@@ -249,7 +251,7 @@ class BaselineRunner:
     def _process_hop_batch_get_scores(self, ultra_model, graph_data, nodes: List[int], 
                                       rel_type: int, batch_size: int) -> Dict[int, torch.Tensor]:
         """Process a batch of nodes through a hop and return all scores (no threshold).
-        Returns dict mapping node -> scores tensor."""
+        Returns dict mapping node -> scores tensor (on CPU to save GPU memory)."""
         node_scores = {}
         for batch_start in range(0, len(nodes), batch_size):
             batch_end = min(batch_start + batch_size, len(nodes))
@@ -261,8 +263,11 @@ class BaselineRunner:
                 scores = ultra_model.forward(graph_data, queries)
             
             for j, node in enumerate(batch_nodes):
-                node_scores[node] = scores[j]
+                # CRITICAL FIX: Move to CPU immediately to free GPU memory
+                node_scores[node] = scores[j].cpu().clone()
             
+            # Explicitly delete GPU tensors before clearing cache
+            del scores, queries
             # Clear GPU cache after each batch to prevent memory accumulation
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -495,28 +500,37 @@ class BaselineRunner:
                 # Hop 1: compute scores for all nodes
                 hop1_query = torch.tensor([[entity_id, rel_types[0]]], dtype=torch.long).to(device)
                 with torch.no_grad():
-                    hop1_scores = ultra_model.forward(graph_data, hop1_query)[0]
+                    hop1_scores_gpu = ultra_model.forward(graph_data, hop1_query)[0]
                 
                 # Hop 2: compute scores only for nodes that pass min_threshold
-                hop1_candidates = self._apply_threshold(hop1_scores, min_threshold)
+                # Apply threshold while still on GPU, then move to CPU
+                hop1_candidates = self._apply_threshold(hop1_scores_gpu, min_threshold)
+                
+                # CRITICAL FIX: Move hop1_scores to CPU immediately after threshold application
+                hop1_scores = hop1_scores_gpu.cpu().clone()
+                del hop1_scores_gpu, hop1_query
+                
                 hop2_scores = self._process_hop_batch_get_scores(ultra_model, graph_data, 
                                                                  hop1_candidates, rel_types[1], batch_size)
+                del hop1_candidates
                 
                 # Hop 3: compute scores only for nodes from hop2 that pass min_threshold
                 hop2_candidates = []
                 for node, scores in hop2_scores.items():
-                    candidates = self._apply_threshold(scores, min_threshold)
+                    # scores are already on CPU (from _process_hop_batch_get_scores), move to GPU for threshold check
+                    candidates = self._apply_threshold(scores.to(device), min_threshold)
                     hop2_candidates.extend(candidates)
                 hop2_candidates = list(set(hop2_candidates))  # Remove duplicates
                 hop3_scores = self._process_hop_batch_get_scores(ultra_model, graph_data,
                                                                  hop2_candidates, rel_types[2], batch_size)
+                del hop2_candidates
                 
                 execution_time_ms = (time.time() - start_time) * 1000  # Store inference time
                 
                 scores_data.append({
-                    'hop1_scores': hop1_scores,
-                    'hop2_scores': hop2_scores,
-                    'hop3_scores': hop3_scores,
+                    'hop1_scores': hop1_scores,  # Already on CPU
+                    'hop2_scores': hop2_scores,  # Already on CPU (from _process_hop_batch_get_scores)
+                    'hop3_scores': hop3_scores,  # Already on CPU (from _process_hop_batch_get_scores)
                     'rel_types': rel_types,
                     'entity_id': entity_id,
                     'ground_truth': gt,
@@ -525,6 +539,11 @@ class BaselineRunner:
                 })
             except Exception as e:
                 self.logger.error(f"Error computing scores for query {i}: {e}")
+                # Explicitly delete any remaining GPU tensors
+                if 'hop1_scores_gpu' in locals():
+                    del hop1_scores_gpu
+                if 'hop1_query' in locals():
+                    del hop1_query
                 # Clear GPU cache to free memory
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -539,6 +558,11 @@ class BaselineRunner:
                     'template': '3p'
                 })
             finally:
+                # Explicitly delete tensors before clearing cache
+                if 'hop1_scores_gpu' in locals():
+                    del hop1_scores_gpu
+                if 'hop1_query' in locals():
+                    del hop1_query
                 # Clear GPU cache after each query to prevent memory accumulation
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -569,18 +593,23 @@ class BaselineRunner:
                 # Branch 1: compute scores for all nodes
                 branch1_query = torch.tensor([[anchor1, rel1]], dtype=torch.long).to(device)
                 with torch.no_grad():
-                    branch1_scores = ultra_model.forward(graph_data, branch1_query)[0]
+                    branch1_scores_gpu = ultra_model.forward(graph_data, branch1_query)[0]
                 
                 # Branch 2: compute scores for all nodes
                 branch2_query = torch.tensor([[anchor2, rel2]], dtype=torch.long).to(device)
                 with torch.no_grad():
-                    branch2_scores = ultra_model.forward(graph_data, branch2_query)[0]
+                    branch2_scores_gpu = ultra_model.forward(graph_data, branch2_query)[0]
+                
+                # CRITICAL FIX: Move scores to CPU immediately to free GPU memory
+                branch1_scores = branch1_scores_gpu.cpu().clone()
+                branch2_scores = branch2_scores_gpu.cpu().clone()
+                del branch1_scores_gpu, branch2_scores_gpu, branch1_query, branch2_query
                 
                 execution_time_ms = (time.time() - start_time) * 1000  # Store inference time
                 
                 scores_data.append({
-                    'branch1_scores': branch1_scores,
-                    'branch2_scores': branch2_scores,
+                    'branch1_scores': branch1_scores,  # On CPU
+                    'branch2_scores': branch2_scores,  # On CPU
                     'anchor1': anchor1,
                     'rel1': rel1,
                     'anchor2': anchor2,
@@ -591,6 +620,15 @@ class BaselineRunner:
                 })
             except Exception as e:
                 self.logger.error(f"Error computing scores for query {i}: {e}")
+                # Explicitly delete any remaining GPU tensors
+                if 'branch1_scores_gpu' in locals():
+                    del branch1_scores_gpu
+                if 'branch2_scores_gpu' in locals():
+                    del branch2_scores_gpu
+                if 'branch1_query' in locals():
+                    del branch1_query
+                if 'branch2_query' in locals():
+                    del branch2_query
                 # Clear GPU cache to free memory
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -636,30 +674,38 @@ class BaselineRunner:
                 # Branch 1: compute scores for all nodes
                 branch1_query = torch.tensor([[anchor1, rel1]], dtype=torch.long).to(device)
                 with torch.no_grad():
-                    branch1_scores = ultra_model.forward(graph_data, branch1_query)[0]
+                    branch1_scores_gpu = ultra_model.forward(graph_data, branch1_query)[0]
                 
                 # Branch 2: compute scores for all nodes
                 branch2_query = torch.tensor([[anchor2, rel2]], dtype=torch.long).to(device)
                 with torch.no_grad():
-                    branch2_scores = ultra_model.forward(graph_data, branch2_query)[0]
+                    branch2_scores_gpu = ultra_model.forward(graph_data, branch2_query)[0]
                 
                 # Compute intersection candidates (nodes that pass min_threshold in both branches)
-                branch1_candidates = self._apply_threshold(branch1_scores, min_threshold)
-                branch2_candidates = self._apply_threshold(branch2_scores, min_threshold)
+                # Apply threshold while still on GPU
+                branch1_candidates = self._apply_threshold(branch1_scores_gpu, min_threshold)
+                branch2_candidates = self._apply_threshold(branch2_scores_gpu, min_threshold)
                 intersection_candidates = list(set(branch1_candidates) & set(branch2_candidates))
+                
+                # CRITICAL FIX: Move scores to CPU immediately after threshold application
+                branch1_scores = branch1_scores_gpu.cpu().clone()
+                branch2_scores = branch2_scores_gpu.cpu().clone()
+                del branch1_scores_gpu, branch2_scores_gpu, branch1_query, branch2_query
+                del branch1_candidates, branch2_candidates
                 
                 # Project scores from intersection candidates
                 proj_scores = {}
                 if intersection_candidates:
                     proj_scores = self._process_hop_batch_get_scores(ultra_model, graph_data,
                                                                      intersection_candidates, rel3, batch_size)
+                del intersection_candidates
                 
                 execution_time_ms = (time.time() - start_time) * 1000  # Store inference time
                 
                 scores_data.append({
-                    'branch1_scores': branch1_scores,
-                    'branch2_scores': branch2_scores,
-                    'proj_scores': proj_scores,  # Dict[node -> scores] for projection
+                    'branch1_scores': branch1_scores,  # On CPU
+                    'branch2_scores': branch2_scores,  # On CPU
+                    'proj_scores': proj_scores,  # Dict[node -> scores] for projection (already on CPU)
                     'anchor1': anchor1,
                     'rel1': rel1,
                     'anchor2': anchor2,
@@ -671,6 +717,18 @@ class BaselineRunner:
                 })
             except Exception as e:
                 self.logger.error(f"Error computing scores for query {i}: {e}")
+                # Explicitly delete any remaining GPU tensors
+                if 'branch1_scores_gpu' in locals():
+                    del branch1_scores_gpu
+                if 'branch2_scores_gpu' in locals():
+                    del branch2_scores_gpu
+                if 'branch1_query' in locals():
+                    del branch1_query
+                if 'branch2_query' in locals():
+                    del branch2_query
+                # Clear GPU cache to free memory
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 scores_data.append({
                     'branch1_scores': None,
                     'branch2_scores': None,
@@ -684,6 +742,19 @@ class BaselineRunner:
                     'execution_time_ms': 0.0,
                     'template': '2ip'
                 })
+            finally:
+                # Explicitly delete tensors before clearing cache
+                if 'branch1_scores_gpu' in locals():
+                    del branch1_scores_gpu
+                if 'branch2_scores_gpu' in locals():
+                    del branch2_scores_gpu
+                if 'branch1_query' in locals():
+                    del branch1_query
+                if 'branch2_query' in locals():
+                    del branch2_query
+                # Clear GPU cache after each query to prevent memory accumulation
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         return scores_data
     
@@ -721,13 +792,13 @@ class BaselineRunner:
                 # Use stored inference time, not threshold application time
                 execution_time_ms = data.get('execution_time_ms', 0.0)
                 
-                # Hop 1: apply threshold
+                # Hop 1: apply threshold (scores are on CPU now)
                 hop1_nodes = self._apply_threshold(data['hop1_scores'], threshold)
                 if not hop1_nodes:
                     results.append(self._create_abstention_result(data['ground_truth'], execution_time_ms))
                     continue
                 
-                # Hop 2: apply threshold to cached scores
+                # Hop 2: apply threshold to cached scores (already on CPU)
                 hop2_nodes_set = set()
                 for hop1_node in hop1_nodes:
                     if hop1_node in data.get('hop2_scores', {}):
@@ -739,7 +810,7 @@ class BaselineRunner:
                     results.append(self._create_abstention_result(data['ground_truth'], execution_time_ms))
                     continue
                 
-                # Hop 3: apply threshold to cached scores
+                # Hop 3: apply threshold to cached scores (already on CPU)
                 hop3_nodes_set = set()
                 for hop2_node in hop2_nodes:
                     if hop2_node in data.get('hop3_scores', {}):
@@ -1070,6 +1141,7 @@ class BaselineRunner:
         
         return results
     
+    
     def _has_neo4j_results(self, skip_neo4j: bool = False) -> bool:
         """Check if we have Neo4j results to save.
         
@@ -1081,6 +1153,205 @@ class BaselineRunner:
     def _has_ultra_results(self) -> bool:
         """Check if we have Ultra Neural results to save."""
         return len(self.results['ultra_neural']) > 0
+    
+    def _has_hybrid_results(self) -> bool:
+        """Check if we have Hybrid Static results to save."""
+        return len(self.results['hybrid_static']) > 0
+    
+    def _create_pipeline_model(self, ultra_model, dbexec_model, args: argparse.Namespace, 
+                              device: str, model_name: str):
+        """Create the appropriate pipeline model based on model name."""
+        from models.topology.three_hop_pipeline import ThreeHopPipeline
+        from models.topology.two_union_pipeline import TwoUnionPipeline
+        from models.topology.two_intersect_project_pipeline import TwoIntersectProjectPipeline
+        
+        if model_name == "ThreeHopPipeline":
+            return ThreeHopPipeline(ultra_model, dbexec_model, args, device)
+        elif model_name == "TwoUnionPipeline":
+            return TwoUnionPipeline(ultra_model, dbexec_model, args, device)
+        elif model_name == "TwoIntersectProjectPipeline":
+            return TwoIntersectProjectPipeline(ultra_model, dbexec_model, args, device)
+        else:
+            raise ValueError(f"Unknown pipeline model: {model_name}")
+    
+    def run_hybrid_baseline(self, pipeline_model, queries: List[str], 
+                           ground_truths: List[List[int]], 
+                           graph_data: Any,
+                           static_thresholds: List[float]) -> List[QueryResult]:
+        """
+        Run hybrid baseline (neural + symbolic) with static thresholds using pipeline classes.
+        Routes to appropriate method based on query template.
+        """
+        # Use template from directory if available, otherwise detect from query string
+        if hasattr(self, 'template_from_dir') and self.template_from_dir:
+            template = self.template_from_dir
+        else:
+            template = self.detect_query_template(queries[0]) if queries else "3p"
+        
+        if template == "2u":
+            return self.run_hybrid_baseline_2u(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
+        elif template == "2ip":
+            return self.run_hybrid_baseline_2ip(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
+        else:
+            return self.run_hybrid_baseline_3p(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
+    
+    def run_hybrid_baseline_3p(self, pipeline_model, queries: List[str], 
+                               ground_truths: List[List[int]], 
+                               graph_data: Any,
+                               static_thresholds: List[float]) -> List[QueryResult]:
+        """
+        Run hybrid baseline for 3p queries with static thresholds using ThreeHopPipeline.
+        Uses the pipeline's predict_with_thresholds method with static thresholds.
+        """
+        self.logger.info(f"Running Hybrid Baseline (3p, thresholds={static_thresholds})...")
+        
+        if len(static_thresholds) < 3:
+            # Default thresholds if not enough provided
+            static_thresholds = static_thresholds + [0.4] * (3 - len(static_thresholds))
+        
+        threshold1, threshold2, threshold3 = static_thresholds[0], static_thresholds[1], static_thresholds[2]
+        lamhat = [threshold1, threshold2, threshold3]
+        
+        results = []
+        pipeline_model.eval()
+        
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths), 
+                                                   total=len(queries),
+                                                   desc="Hybrid (3p)")):
+            try:
+                entity_id, rel_types = self.parse_query_3p(query_str)
+                query_tensor = torch.tensor([[entity_id] + rel_types], dtype=torch.long)
+                
+                start_time = time.time()
+                # Use pipeline's predict_with_thresholds method
+                predictions = pipeline_model.predict_with_thresholds(
+                    query_tensor, lamhat, graph_data
+                )
+                execution_time_ms = (time.time() - start_time) * 1000
+                
+                pred_values = predictions[0] if predictions else []
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                
+                results.append(QueryResult(
+                    precision=precision,
+                    recall=recall,
+                    f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        
+        return results
+    
+    def run_hybrid_baseline_2u(self, pipeline_model, queries: List[str], 
+                               ground_truths: List[List[int]], 
+                               graph_data: Any,
+                               static_thresholds: List[float]) -> List[QueryResult]:
+        """
+        Run hybrid baseline for 2u queries with static thresholds using TwoUnionPipeline.
+        """
+        self.logger.info(f"Running Hybrid Baseline (2u, thresholds={static_thresholds})...")
+        
+        if len(static_thresholds) < 2:
+            # Default thresholds if not enough provided
+            static_thresholds = static_thresholds + [0.4] * (2 - len(static_thresholds))
+        
+        threshold1, threshold2 = static_thresholds[0], static_thresholds[1]
+        lamhat = [threshold1, threshold2]
+        
+        results = []
+        pipeline_model.eval()
+        
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths), 
+                                                   total=len(queries),
+                                                   desc="Hybrid (2u)")):
+            try:
+                anchor1, rel1, anchor2, rel2 = self.parse_query_2u(query_str)
+                query_tensor = torch.tensor([[anchor1, rel1, anchor2, rel2]], dtype=torch.long)
+                
+                start_time = time.time()
+                # Use pipeline's predict_with_thresholds method
+                predictions = pipeline_model.predict_with_thresholds(
+                    query_tensor, lamhat, graph_data
+                )
+                execution_time_ms = (time.time() - start_time) * 1000
+                
+                pred_values = predictions[0] if predictions else []
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                
+                results.append(QueryResult(
+                    precision=precision,
+                    recall=recall,
+                    f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        
+        return results
+    
+    def run_hybrid_baseline_2ip(self, pipeline_model, queries: List[str], 
+                                ground_truths: List[List[int]], 
+                                graph_data: Any,
+                                static_thresholds: List[float]) -> List[QueryResult]:
+        """
+        Run hybrid baseline for 2ip queries with static thresholds using TwoIntersectProjectPipeline.
+        """
+        self.logger.info(f"Running Hybrid Baseline (2ip, thresholds={static_thresholds})...")
+        
+        if len(static_thresholds) < 3:
+            # Default thresholds if not enough provided
+            static_thresholds = static_thresholds + [0.4] * (3 - len(static_thresholds))
+        
+        threshold_branch1, threshold_branch2, threshold_proj = static_thresholds[0], static_thresholds[1], static_thresholds[2]
+        lamhat = [threshold_branch1, threshold_branch2, threshold_proj]
+        
+        results = []
+        pipeline_model.eval()
+        
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths), 
+                                                   total=len(queries),
+                                                   desc="Hybrid (2ip)")):
+            try:
+                anchor1, rel1, anchor2, rel2, rel3 = self.parse_query_2ip(query_str)
+                query_tensor = torch.tensor([[anchor1, rel1, anchor2, rel2, rel3]], dtype=torch.long)
+                
+                start_time = time.time()
+                # Use pipeline's predict_with_thresholds method
+                predictions = pipeline_model.predict_with_thresholds(
+                    query_tensor, lamhat, graph_data
+                )
+                execution_time_ms = (time.time() - start_time) * 1000
+                
+                pred_values = predictions[0] if predictions else []
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                
+                results.append(QueryResult(
+                    precision=precision,
+                    recall=recall,
+                    f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        
+        return results
+    
+    def _has_hybrid_results(self) -> bool:
+        """Check if we have Hybrid results to save."""
+        return len(self.results['hybrid_static']) > 0
     
     def _write_csv_line(self, f, baseline_type: str, threshold: str, stats: Dict[str, float]):
         """Write a single CSV line for baseline results."""
@@ -1132,19 +1403,20 @@ class BaselineRunner:
     def _load_models_and_queries(self, load_path: Optional[str], device: str,
                                  neo4j_host: str, neo4j_bolt_port: int,
                                  node_unique_id: str, relation_unique_id: str,
-                                 scores_cache: Optional[List[Dict]], skip_neo4j: bool, skip_ultra: bool):
+                                 scores_cache: Optional[List[Dict]], skip_neo4j: bool, skip_ultra: bool,
+                                 skip_hybrid: bool = True):
         """
         Load models, graph data, and queries.
         
         Returns:
-            Tuple of (ultra_model, graph_data, db_controller, queries, ground_truths)
+            Tuple of (ultra_model, graph_data, db_controller, queries, ground_truths, hybrid_model)
         """
         # Skip model/graph loading if we have cached scores AND skipping neo4j
         # (only need to apply thresholds, no model inference or neo4j queries needed)
-        if scores_cache is not None and skip_neo4j:
+        if scores_cache is not None and skip_neo4j and skip_hybrid:
             self.logger.info("Using cached scores - skipping model/graph loading")
             queries, ground_truths = self._load_queries()
-            return None, None, None, queries, ground_truths
+            return None, None, None, queries, ground_truths, None
         
         # Setup models
         self.logger.info("Setting up models...")
@@ -1193,18 +1465,65 @@ class BaselineRunner:
         else:
             self.logger.info("Skipping Ultra model loading (symbolic baseline only)")
         
+        # Load hybrid pipeline model if needed
+        hybrid_model = None
+        if not skip_hybrid:
+            self.logger.info("Loading hybrid pipeline model...")
+            if ultra_model is None or graph_data is None:
+                # Need to load Ultra model first
+                if ultra_model is None:
+                    inf_args = argparse.Namespace(
+                        load_path=load_path,
+                        device=device,
+                        neo4j_host=neo4j_host,
+                        neo4j_bolt_port=neo4j_bolt_port,
+                        node_unique_id=node_unique_id,
+                        relation_unique_id=relation_unique_id,
+                        model_to_infer="ULTRA",
+                        db_controller=db_controller,
+                    )
+                    inf_args.load_path = self._resolve_load_path(load_path)
+                    if not inf_args.load_path:
+                        raise ValueError("--load-path is required for hybrid baseline.")
+                    inf_args_ultra = argparse.Namespace(**vars(inf_args))
+                    inf_args_ultra.model_to_infer = "ULTRA"
+                    model_factory_ultra = ModelFactory(inf_args_ultra)
+                    model_factory_ultra.prepare_model()
+                    ultra_model = model_factory_ultra.model
+                
+                if graph_data is None:
+                    graph_data = get_graph(db_controller, device)
+            
+            # Create DBExecModel
+            from models.db_exec.model import DBExecModel
+            num_relations = db_controller.get_num_relations()
+            dbexec_args = argparse.Namespace(db_controller=db_controller)
+            dbexec_model = DBExecModel(dbexec_args, num_relations=num_relations, device=device)
+            
+            # Determine pipeline model name from query directory
+            model_name = _get_model_from_query_dir(self.query_dir)
+            
+            # Create pipeline model using the factory method
+            pipeline_args = argparse.Namespace(
+                device=device,
+                db_controller=db_controller,
+                max_internal_batch=getattr(self, 'ultra_batch_size', 64),
+                calib_batch_size=getattr(self, 'ultra_batch_size', 64)
+            )
+            hybrid_model = self._create_pipeline_model(ultra_model, dbexec_model, pipeline_args, device, model_name)
+        
         # Load queries
         queries, ground_truths = self._load_queries()
         
-        return ultra_model, graph_data, db_controller, queries, ground_truths
+        return ultra_model, graph_data, db_controller, queries, ground_truths, hybrid_model
     
-    def _run_baselines(self, skip_neo4j: bool, skip_ultra: bool, compute_scores_only: bool,
+    def _run_baselines(self, skip_neo4j: bool, skip_ultra: bool, skip_hybrid: bool, compute_scores_only: bool,
                       db_controller, queries: List[str], ground_truths: List[List[int]],
                       ultra_model, graph_data, static_threshold: float,
                       scores_cache: Optional[List[Dict]], min_threshold: float,
-                      output_dir: str) -> Optional[Dict]:
+                      output_dir: str, hybrid_model=None, hybrid_thresholds: Optional[List[float]] = None) -> Optional[Dict]:
         """
-        Run Neo4j and/or Ultra baselines based on skip flags.
+        Run Neo4j, Ultra, and/or Hybrid baselines based on skip flags.
         
         Returns:
             Dict with 'scores_cache' if compute_scores_only is True, None otherwise
@@ -1218,35 +1537,57 @@ class BaselineRunner:
             self.results['neo4j_symbolic'].extend(neo4j_results)
         
         # Run Ultra baseline
-        if skip_ultra:
-            return None
+        if not skip_ultra:
+            if compute_scores_only:
+                # Only compute scores, don't apply threshold
+                self.logger.info("\n" + "-"*80)
+                self.logger.info("Computing all Ultra scores")
+                self.logger.info("-"*80)
+                self.ultra_scores_cache = self.compute_ultra_scores(
+                    ultra_model, queries, ground_truths, graph_data,
+                    min_threshold=min_threshold,
+                    batch_size=self.ultra_batch_size
+                )
+                
+                # Still save Neo4j results if we ran it
+                if not skip_neo4j:
+                    self.save_results(output_dir, skip_neo4j=False)
+                
+                return {'scores_cache': self.ultra_scores_cache}
+            else:
+                # Apply threshold to scores (either from cache or compute on the fly)
+                self.logger.info("\n" + "-"*80)
+                self.logger.info("Running Ultra Neural Baseline")
+                self.logger.info("-"*80)
+                ultra_results = self.run_ultra_pipeline_baseline(
+                    ultra_model, queries, ground_truths, graph_data, static_threshold,
+                    batch_size=self.ultra_batch_size, scores_cache=scores_cache
+                )
+                self.results['ultra_neural'].extend(ultra_results)
         
-        if compute_scores_only:
-            # Only compute scores, don't apply threshold
+        # Run Hybrid baseline
+        if not skip_hybrid and hybrid_model is not None:
             self.logger.info("\n" + "-"*80)
-            self.logger.info("Computing all Ultra scores")
+            self.logger.info("Running Hybrid Baseline (neural + symbolic)")
             self.logger.info("-"*80)
-            self.ultra_scores_cache = self.compute_ultra_scores(
-                ultra_model, queries, ground_truths, graph_data,
-                min_threshold=min_threshold,
-                batch_size=self.ultra_batch_size
-            )
+            if hybrid_thresholds is None:
+                # Default thresholds based on query type
+                if hasattr(self, 'template_from_dir') and self.template_from_dir:
+                    template = self.template_from_dir
+                else:
+                    template = self.detect_query_template(queries[0]) if queries else "3p"
+                
+                if template == "2u":
+                    hybrid_thresholds = [static_threshold, static_threshold]
+                elif template == "2ip":
+                    hybrid_thresholds = [static_threshold, static_threshold, static_threshold]
+                elif template == "3p":
+                    hybrid_thresholds = [static_threshold, static_threshold, static_threshold]
             
-            # Still save Neo4j results if we ran it
-            if not skip_neo4j:
-                self.save_results(output_dir, skip_neo4j=False)
-            
-            return {'scores_cache': self.ultra_scores_cache}
-        else:
-            # Apply threshold to scores (either from cache or compute on the fly)
-            self.logger.info("\n" + "-"*80)
-            self.logger.info("Running Ultra Neural Baseline")
-            self.logger.info("-"*80)
-            ultra_results = self.run_ultra_pipeline_baseline(
-                ultra_model, queries, ground_truths, graph_data, static_threshold,
-                batch_size=self.ultra_batch_size, scores_cache=scores_cache
+            hybrid_results = self.run_hybrid_baseline(
+                hybrid_model, queries, ground_truths, graph_data, hybrid_thresholds
             )
-            self.results['ultra_neural'].extend(ultra_results)
+            self.results['hybrid_static'].extend(hybrid_results)
             return None
     
     def _resolve_load_path(self, load_path: Optional[str]) -> Optional[str]:
@@ -1325,8 +1666,15 @@ class BaselineRunner:
             # Save Ultra Neural results only if they exist
             if self._has_ultra_results():
                 ultra_stats = self.compute_summary_stats(self.results['ultra_neural'])
-                threshold_str = f"{self.ultra_threshold:.2f}" if self.ultra_threshold else "0.75"
+                threshold_str = f"{self.threshold:.2f}" if self.threshold else "0.75"
                 self._write_csv_line(f, "neural", threshold_str, ultra_stats)
+            
+            # Save Hybrid results only if they exist
+            if self._has_hybrid_results():
+                hybrid_stats = self.compute_summary_stats(self.results['hybrid_static'])
+                # Use stored threshold or default
+                threshold_str = f"{self.threshold:.2f}" if self.threshold else "0.75"
+                self._write_csv_line(f, "hybrid", threshold_str, hybrid_stats)
         
         self.logger.info(f"Baseline summary saved to: {baseline_summary_path}")
         
@@ -1341,6 +1689,11 @@ class BaselineRunner:
         if self._has_ultra_results():
             detailed_results['ultra_neural'] = [
                 self._serialize_result(r) for r in self.results['ultra_neural']
+            ]
+        # Save Hybrid results only if they exist
+        if self._has_hybrid_results():
+            detailed_results['hybrid_static'] = [
+                self._serialize_result(r) for r in self.results['hybrid_static']
             ]
         
         detailed_path = os.path.join(output_dir, "baseline_detailed_results.json")
@@ -1361,16 +1714,22 @@ class BaselineRunner:
         # Print Ultra Neural results only if they exist
         if self._has_ultra_results():
             ultra_stats = self.compute_summary_stats(self.results['ultra_neural'])
-            threshold_str = f"{self.ultra_threshold:.2f}" if self.ultra_threshold else "0.75"
+            threshold_str = f"{self.threshold:.2f}" if self.threshold else "0.75"
             self._print_stats(f"Ultra Neural (threshold={threshold_str})", ultra_stats)
+        
+        # Print Hybrid results only if they exist
+        if self._has_hybrid_results():
+            hybrid_stats = self.compute_summary_stats(self.results['hybrid_static'])
+            threshold_str = f"{self.threshold:.2f}" if self.threshold else "0.75"
+            self._print_stats(f"Hybrid Static (threshold={threshold_str})", hybrid_stats)
     
     def run(self, output_dir: str, static_threshold: float = 0.75, 
             load_path: str = None, device: str = "cuda",
             neo4j_host: str = "localhost", neo4j_bolt_port: int = 7687,
             node_unique_id: str = "id", relation_unique_id: str = "type",
-            skip_neo4j: bool = False, skip_ultra: bool = False,
+            skip_neo4j: bool = False, skip_ultra: bool = False, skip_hybrid: bool = True,
             compute_scores_only: bool = False, scores_cache: Optional[List[Dict]] = None,
-            min_threshold: float = 0.0):
+            min_threshold: float = 0.0, hybrid_thresholds: Optional[List[float]] = None):
         """
         Run both baselines on benchmark queries.
         
@@ -1390,7 +1749,7 @@ class BaselineRunner:
             min_threshold: Minimum threshold for computing scores (to avoid computing for all nodes)
         """
         # Store threshold for reporting
-        self.ultra_threshold = static_threshold
+        self.threshold = static_threshold
         
         self.logger.info("="*80)
         self.logger.info("BASELINE BENCHMARK RUNNER")
@@ -1398,21 +1757,22 @@ class BaselineRunner:
         self.logger.info(f"Query directory: {self.query_dir}")
         self.logger.info(f"Max queries: {self.max_queries}")
         self.logger.info(f"Output directory: {output_dir}")
-        self.logger.info(f"Ultra threshold: {static_threshold}")
+        self.logger.info(f"Threshold: {static_threshold}")
         self.logger.info("="*80)
         
         # Load models and queries
-        ultra_model, graph_data, db_controller, queries, ground_truths = self._load_models_and_queries(
+        ultra_model, graph_data, db_controller, queries, ground_truths, hybrid_model = self._load_models_and_queries(
             load_path, device, neo4j_host, neo4j_bolt_port,
-            node_unique_id, relation_unique_id, scores_cache, skip_neo4j, skip_ultra
+            node_unique_id, relation_unique_id, scores_cache, skip_neo4j, skip_ultra, skip_hybrid
         )
                 
         # Run baselines
         result = self._run_baselines(
-            skip_neo4j, skip_ultra, compute_scores_only,
+            skip_neo4j, skip_ultra, skip_hybrid, compute_scores_only,
             db_controller, queries, ground_truths,
             ultra_model, graph_data, static_threshold,
-            scores_cache, min_threshold, output_dir
+            scores_cache, min_threshold, output_dir,
+            hybrid_model, hybrid_thresholds
         )
         
         # If compute_scores_only, return early (results already saved if needed)
@@ -1501,6 +1861,7 @@ def _get_skip_flags_from_baseline_type(baseline_type: str) -> Tuple[bool, bool]:
     baseline_configs = {
         "neural": (True, False),   # Skip Neo4j, run Ultra
         "symbolic": (False, True),  # Run Neo4j, skip Ultra
+        "hybrid": (True, True),     # Skip both individual baselines, run hybrid
     }
     return baseline_configs.get(baseline_type, (False, False))
 
@@ -1540,6 +1901,7 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
         relation_unique_id=args.relation_unique_id,
         skip_neo4j=skip_neo4j,
         skip_ultra=skip_ultra,
+        skip_hybrid=True,  # Skip hybrid for multiple threshold sweeps (Ultra only)
         compute_scores_only=True,
         min_threshold=args.min_threshold
     )
@@ -1560,6 +1922,7 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
             relation_unique_id=args.relation_unique_id,
             skip_neo4j=True,  # Skip Neo4j for threshold subdirectories
             skip_ultra=skip_ultra,
+            skip_hybrid=True,  # Skip hybrid for threshold subdirectories
             scores_cache=scores_cache,
             min_threshold=args.min_threshold
         )
@@ -1580,12 +1943,12 @@ def main():
                        choices=["fb15k-237", "nell-955", "yago310"],
                        help="Dataset name: fb15k-237, nell-955, or yago310")
     parser.add_argument("--baseline-type", type=str, default=None,
-                       choices=["neural", "symbolic"],
-                       help="Baseline type: neural (Ultra) or symbolic (Neo4j)")
+                       choices=["neural", "symbolic", "hybrid"],
+                       help="Baseline type: neural (Ultra), symbolic (Neo4j), or hybrid (neural + symbolic)")
     parser.add_argument("--incompleteness", type=int, default=None,
                        help="Data incompleteness level (e.g., 20 for 20% missing)")
-    parser.add_argument("--ultra-threshold", type=float, default=0.75,
-                       help="Static threshold for Ultra neural baseline")
+    parser.add_argument("--threshold", type=float, default=0.75,
+                       help="Static threshold for neural baseline (and default for hybrid if --hybrid-thresholds not provided)")
     parser.add_argument("--ultra-batch-size", type=int, default=4,
                        help="Batch size for Ultra intermediate hops (to avoid GPU OOM, default: 16)")
     parser.add_argument("--load-path", type=str, default=None,
@@ -1608,6 +1971,10 @@ def main():
                        help="Minimum threshold for computing scores (to avoid computing for all nodes)")
     parser.add_argument("--ultra-thresholds", type=float, nargs='+', default=None,
                        help="Multiple thresholds to apply (if provided, computes scores once and applies all thresholds)")
+    parser.add_argument("--skip-hybrid", action="store_true",
+                       help="Skip hybrid baseline (neural + symbolic with static thresholds)")
+    parser.add_argument("--hybrid-thresholds", type=float, nargs='+', default=None,
+                       help="Static thresholds for hybrid baseline (default: use --threshold for all hops)")
     
     args = parser.parse_args()
     
@@ -1626,6 +1993,12 @@ def main():
     skip_neo4j, skip_ultra = _get_skip_flags_from_baseline_type(args.baseline_type) if args.baseline_type else (args.skip_neo4j, False)
     if args.baseline_type:
         args.skip_neo4j = skip_neo4j
+        if args.baseline_type == "hybrid":
+            skip_hybrid = False  # Run hybrid when baseline_type is "hybrid"
+        else:
+            skip_hybrid = args.skip_hybrid
+    else:
+        skip_hybrid = args.skip_hybrid
     
     # Print configuration
     _print_configuration(args.dataset, args.baseline_type, args.incompleteness, args.output_dir, model_to_infer)
@@ -1644,7 +2017,7 @@ def main():
     else:
         runner.run(
             output_dir=args.output_dir,
-            static_threshold=args.ultra_threshold,
+            static_threshold=args.threshold,
             load_path=args.load_path,
             device=args.device,
             neo4j_host=args.neo4j_host,
@@ -1653,8 +2026,10 @@ def main():
             relation_unique_id=args.relation_unique_id,
             skip_neo4j=args.skip_neo4j,
             skip_ultra=skip_ultra,
+            skip_hybrid=skip_hybrid,
             compute_scores_only=args.compute_scores_only,
-            min_threshold=args.min_threshold
+            min_threshold=args.min_threshold,
+            hybrid_thresholds=args.hybrid_thresholds
         )
 
 

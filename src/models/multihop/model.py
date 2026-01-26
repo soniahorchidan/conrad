@@ -31,20 +31,19 @@ class MultiHopPredictor(nn.Module):
             """
             neo_mask = neo_scores > 0
             
-            # 1. Normalize Neo4j to [0.5, 1.0] globally
-            # We assume raw Neo4j is roughly [0, 1]. If not, divide by a global max.
+            # Normalize Neo4j to [0.5, 1.0] globally
             neo_global_max = 1.0 
             neo_norm = torch.clamp(neo_scores / neo_global_max, 0, 1.0)
             # Using sqrt helps spread out the high-confidence scores
             neo_final = 0.5 + (torch.sqrt(neo_norm) * 0.499) 
             
-            # 2. Normalize ULTRA to [0, 0.499] globally
+            # Normalize ULTRA to [0, 0.499] globally
             ultra_final = ultra_scores * 0.499
             
-            # 3. Combine
+            # Combine
             unified = torch.where(neo_mask, neo_final, ultra_final)
             
-            # 4. add small jitter to break ties
+            # add small jitter to break ties
             # This turns the 'stairs' into a 'ramp'
             # 1e-7 is large enough to break ties but too small to flip the ULTRA/Neo hierarchy
             jitter = torch.rand_like(unified) * 1e-7
