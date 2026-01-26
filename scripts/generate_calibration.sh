@@ -71,17 +71,14 @@ REL_FILE="${DATASET_DATA_DIR}/neo4j_train_ind_rels.csv"
 if [ ! -f "${NODE_FILE}" ] || [ ! -f "${REL_FILE}" ]; then
     log INFO "Dataset files not found. Preparing dataset..."
     case "${DATASET}" in
-        yago310)
-            python3 "${REPO_ROOT}/scripts/prepare_yago310.py"
-            ;;
-        fb15k-237|nell-955)
-            log ERROR "Dataset files not found for ${DATASET}"
-            log ERROR "Please ensure the dataset files are available at ${DATASET_DATA_DIR}/"
-            log ERROR "For yago310, you can run: ./build.sh prepare_dataset yago310"
-            exit 1
+        fb15k-237|nell-955|yago310)
+            # Use process_dataset.py for all supported datasets
+            python3 "${REPO_ROOT}/scripts/process_dataset.py" "${DATASET}"
             ;;
         *)
             log ERROR "Unknown dataset: ${DATASET}"
+            log ERROR "Supported datasets: fb15k-237, nell-955, yago310"
+            log ERROR "You can run: python3 scripts/process_dataset.py <dataset>"
             exit 1
             ;;
     esac
@@ -200,21 +197,21 @@ else
     log INFO "Skipping inverse relation creation for ${DATASET} (already has inverse relations)"
 fi
 
-# log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
-# mkdir -p "${CRC_DATA_DIR}"
-# python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
-#     --generate-3p \
-#     --generate-2ip \
-#     --generate-2u \
-#     --num-queries 2000 \
-#     --num-2ip-queries 2000 \
-#     --num-2u-queries 2000 \
-#     --size-ratio 1.0 \
-#     --max-hop-size 50 \
-#     --extract-intermediate \
-#     --calib-split 0.5 \
-#     --test-path "${TEST_BASE_DIR}" \
-#     --calib-path "${CALIBRATION_BASE_DIR}"
+log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
+mkdir -p "${CRC_DATA_DIR}"
+python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
+    --generate-3p \
+    --generate-2ip \
+    --generate-2u \
+    --num-queries 2000 \
+    --num-2ip-queries 2000 \
+    --num-2u-queries 2000 \
+    --size-ratio 1.0 \
+    --max-hop-size 50 \
+    --extract-intermediate \
+    --calib-split 0.5 \
+    --test-path "${TEST_BASE_DIR}" \
+    --calib-path "${CALIBRATION_BASE_DIR}"
 
 log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
 python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"

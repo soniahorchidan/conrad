@@ -129,21 +129,33 @@ import_neo4j() {
     if [ ! -f "$node_header_file" ]; then
         echo "Error: Required file not found: $node_header_file"
         echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        if [ "$dataset" == "fb15k-237" ] || [ "$dataset" == "nell-955" ] || [ "$dataset" == "yago310" ]; then
+            echo "For $dataset, you can run: python3 scripts/process_dataset.py $dataset"
+        fi
         exit 1
     fi
     if [ ! -f "$node_file" ]; then
         echo "Error: Required file not found: $node_file"
         echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        if [ "$dataset" == "fb15k-237" ] || [ "$dataset" == "nell-955" ] || [ "$dataset" == "yago310" ]; then
+            echo "For $dataset, you can run: python3 scripts/process_dataset.py $dataset"
+        fi
         exit 1
     fi
     if [ ! -f "$rel_header_file" ]; then
         echo "Error: Required file not found: $rel_header_file"
         echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        if [ "$dataset" == "fb15k-237" ] || [ "$dataset" == "nell-955" ] || [ "$dataset" == "yago310" ]; then
+            echo "For $dataset, you can run: python3 scripts/process_dataset.py $dataset"
+        fi
         exit 1
     fi
     if [ ! -f "$rel_file" ]; then
         echo "Error: Required file not found: $rel_file"
         echo "Please ensure the dataset files are available at $DATA_PATH/$dataset/"
+        if [ "$dataset" == "fb15k-237" ] || [ "$dataset" == "nell-955" ] || [ "$dataset" == "yago310" ]; then
+            echo "For $dataset, you can run: python3 scripts/process_dataset.py $dataset"
+        fi
         exit 1
     fi
 

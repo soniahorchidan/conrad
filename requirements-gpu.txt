@@ -18,3 +18,4 @@ torch-scatter
 torch-sparse
 rspmm-cuda==0.2.4
 datasets
+pyjson5
