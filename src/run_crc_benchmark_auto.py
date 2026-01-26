@@ -212,7 +212,7 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
             "--mode", "benchmark",
             "--confidence", str(conf),
             "--lambdas-file", lambdas_json_path,
-            "--max-eval-queries", str(max_eval_queries)
+            "--max-eval-queries", str(max_eval_queries),
         ] + extra_args
         
         returncode, output = run_command(benchmark_cmd, benchmark_log)

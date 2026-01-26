@@ -14,7 +14,7 @@ import numpy as np
 from tqdm import tqdm
 
 from inference import ModelFactory, parse_args_inference
-from utils import merge_args, set_logger, parse_time, get_graph
+from utils import merge_args, get_graph
 from graph_handler import Neo4JBackendDBController
 from conformal_prediction.utils import compute_fnr_metrics
 from conformal_prediction.validate_conformal_risk_control import get_dataset_statistics
@@ -759,13 +759,11 @@ def main():
         command_line_args=remaining_args,
     )
     
-    # Initialize logging early so all messages are captured
-    time_str = parse_time()
-    os.makedirs(inf_args.log_path, exist_ok=True)
-    set_logger(
-        inf_args.log_path,
-        f"validate_crc_{inf_args.model_to_infer}_{time_str}.log",
-        True,
+    # Initialize logging to console only (output will be captured by run_crc_benchmark_auto.py)
+    logging.basicConfig(
+        format="[%(asctime)s][%(filename)s][line:%(lineno)d][%(levelname)s] %(message)s",
+        level=logging.INFO,
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     
     # Update load_path based on dataset to use dataset-specific model
@@ -810,9 +808,6 @@ def main():
         else:
             logging.warning(f"Unknown dataset '{args_validate_crc.dataset}', using default load_path: {inf_args.load_path}")
     
-    save_path = os.path.join(inf_args.log_path, f"crc_{time_str}")
-    os.makedirs(save_path, exist_ok=True)
-
     # Check if model is supported
     model_name = inf_args.model_to_infer.lower()
     if model_name not in BenchmarkConfig.MODEL_TO_QUERY_TYPE:
