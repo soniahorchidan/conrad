@@ -214,3 +214,4 @@ artifacts/inference_logs/
 artifacts/data/yago310/
 queries/
 external/
+prep_env.sh

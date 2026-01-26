@@ -308,6 +308,8 @@ def main():
     parser.add_argument("--dataset", type=str, default=None,
                        choices=["fb15k-237", "nell-955", "yago310"],
                        help="Dataset name: fb15k-237, nell-955, or yago310 (required for dataset-specific calibration data)")
+    parser.add_argument("--incompleteness", type=int, default=None,
+                       help="Data incompleteness level (e.g., 20 for 20% missing)")
     
     # Parse known args and collect any extra args to pass through
     args, extra_args = parser.parse_known_args()
@@ -316,15 +318,44 @@ def main():
     if args.dataset is None:
         parser.error("--dataset argument is required. Supported datasets: fb15k-237, nell-955, yago310")
     
+    # Extract model_to_infer from extra_args
+    model_to_infer = None
+    for i, arg in enumerate(extra_args):
+        if arg == "--model_to_infer" and i + 1 < len(extra_args):
+            model_to_infer = extra_args[i + 1]
+            break
+    
+    # Validate incompleteness is provided
+    if args.incompleteness is None:
+        parser.error("--incompleteness argument is required. Please specify the data incompleteness level (e.g., 20 for 20% missing)")
+    
+    # Validate model_to_infer is provided
+    if model_to_infer is None:
+        parser.error("--model_to_infer argument is required in extra_args. Please specify the model to infer (e.g., ThreeHopPipeline)")
+    
+    # Get repo root (script is in src/, go up one level)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+    
     # Set output directory
     if args.output_dir is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_dir = f"crc_benchmark_results_{timestamp}"
+        # Format: conrad_bench_<dataset>_<model_to_infer>_<incompleteness>
+        folder_name = f"conrad_bench_{args.dataset}_{model_to_infer}_{args.incompleteness}"
+        # Write to artifacts/benchmark/
+        benchmark_dir = os.path.join(repo_root, "artifacts", "benchmark")
+        os.makedirs(benchmark_dir, exist_ok=True)
+        args.output_dir = os.path.join(benchmark_dir, folder_name)
+    else:
+        # If output_dir is provided, ensure it's an absolute path or relative to repo root
+        if not os.path.isabs(args.output_dir):
+            args.output_dir = os.path.join(repo_root, args.output_dir)
     
     print("="*80)
     print("AUTOMATED CRC BENCHMARK SWEEP")
     print("="*80)
     print(f"Dataset: {args.dataset}")
+    print(f"Model to infer: {model_to_infer}")
+    print(f"Incompleteness level: {args.incompleteness}%")
     print(f"Confidence levels: {args.confidence_levels}")
     print(f"Max calibration queries: {args.max_calibration_queries}")
     print(f"Output directory: {args.output_dir}")

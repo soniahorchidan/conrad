@@ -200,21 +200,21 @@ else
     log INFO "Skipping inverse relation creation for ${DATASET} (already has inverse relations)"
 fi
 
-log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
-mkdir -p "${CRC_DATA_DIR}"
-python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
-    --generate-3p \
-    --generate-2ip \
-    --generate-2u \
-    --num-queries 2000 \
-    --num-2ip-queries 2000 \
-    --num-2u-queries 2000 \
-    --size-ratio 1.0 \
-    --max-hop-size 50 \
-    --extract-intermediate \
-    --calib-split 0.5 \
-    --test-path "${TEST_BASE_DIR}" \
-    --calib-path "${CALIBRATION_BASE_DIR}"
+# log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
+# mkdir -p "${CRC_DATA_DIR}"
+# python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
+#     --generate-3p \
+#     --generate-2ip \
+#     --generate-2u \
+#     --num-queries 2000 \
+#     --num-2ip-queries 2000 \
+#     --num-2u-queries 2000 \
+#     --size-ratio 1.0 \
+#     --max-hop-size 50 \
+#     --extract-intermediate \
+#     --calib-split 0.5 \
+#     --test-path "${TEST_BASE_DIR}" \
+#     --calib-path "${CALIBRATION_BASE_DIR}"
 
 log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
 python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"

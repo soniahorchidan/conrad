@@ -31,12 +31,13 @@ from tqdm import tqdm
 # Add parent dirs to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'benchmark'))
 
-from inference import ModelFactory, parse_args_inference
-from utils import merge_args, set_logger, parse_time, get_graph
+from inference import ModelFactory
+from utils import set_logger, parse_time, get_graph
 from graph_handler import Neo4JBackendDBController
 from conformal_prediction.utils import compute_fnr_metrics
 import argparse as argparse_module
 
+# TODO(Sonia): split this into multiple files under src/baseline_runners/
 
 @dataclass
 class QueryResult:
@@ -1117,24 +1118,141 @@ class BaselineRunner:
             self.logger.info(f"  Recall (excl. abstentions):    {stats['recall_excl_abstentions']:.4f}")
             self.logger.info(f"  F1 (excl. abstentions):        {stats['f1_excl_abstentions']:.4f}")
     
-    def _resolve_load_path(self, args_file: str, load_path: Optional[str], inf_args) -> str:
-        """Resolve load_path from provided value, config file, or auto-detect."""
+    def _load_queries(self) -> Tuple[List[str], List[List[int]]]:
+        """Load queries and ground truths from directory."""
+        self.logger.info("Loading benchmark queries...")
+        self.logger.info(f"Loading from: {self.query_dir}")
+        queries = self.load_queries_from_dir()
+        ground_truths = self.load_ground_truth_from_dir()
+        min_len = min(len(queries), len(ground_truths))
+        queries, ground_truths = queries[:min_len], ground_truths[:min_len]
+        self.logger.info(f"Loaded {len(queries)} queries")
+        return queries, ground_truths
+    
+    def _load_models_and_queries(self, load_path: Optional[str], device: str,
+                                 neo4j_host: str, neo4j_bolt_port: int,
+                                 node_unique_id: str, relation_unique_id: str,
+                                 scores_cache: Optional[List[Dict]], skip_neo4j: bool, skip_ultra: bool):
+        """
+        Load models, graph data, and queries.
+        
+        Returns:
+            Tuple of (ultra_model, graph_data, db_controller, queries, ground_truths)
+        """
+        # Skip model/graph loading if we have cached scores AND skipping neo4j
+        # (only need to apply thresholds, no model inference or neo4j queries needed)
+        if scores_cache is not None and skip_neo4j:
+            self.logger.info("Using cached scores - skipping model/graph loading")
+            queries, ground_truths = self._load_queries()
+            return None, None, None, queries, ground_truths
+        
+        # Setup models
+        self.logger.info("Setting up models...")
+        
+        # Setup DB controller (needed for Neo4j baseline)
+        db_controller = Neo4JBackendDBController(
+            f"neo4j://{neo4j_host}:{neo4j_bolt_port}",
+            node_unique_id,
+            relation_unique_id,
+        )
+        
+        ultra_model = None
+        graph_data = None
+        
+        # Only load Ultra model if we're running Ultra baseline
+        if not skip_ultra:
+            # Create inference args namespace for Ultra
+            inf_args = argparse.Namespace(
+                load_path=load_path,
+                device=device,
+                neo4j_host=neo4j_host,
+                neo4j_bolt_port=neo4j_bolt_port,
+                node_unique_id=node_unique_id,
+                relation_unique_id=relation_unique_id,
+                model_to_infer="ULTRA",
+                db_controller=db_controller,
+            )
+            
+            # Resolve load_path
+            inf_args.load_path = self._resolve_load_path(load_path)
+            if not inf_args.load_path:
+                raise ValueError("--load-path is required for Ultra baseline. Please specify the path to pretrained model directory.")
+            self.logger.info(f"Using load_path: {inf_args.load_path}")
+            
+            # Load Ultra model
+            self.logger.info("Loading Ultra model...")
+            inf_args_ultra = argparse.Namespace(**vars(inf_args))
+            inf_args_ultra.model_to_infer = "ULTRA"
+            model_factory_ultra = ModelFactory(inf_args_ultra)
+            model_factory_ultra.prepare_model()
+            ultra_model = model_factory_ultra.model
+            
+            # Load graph data (needed for Ultra)
+            self.logger.info("Loading graph data...")
+            graph_data = get_graph(db_controller, device)
+        else:
+            self.logger.info("Skipping Ultra model loading (symbolic baseline only)")
+        
+        # Load queries
+        queries, ground_truths = self._load_queries()
+        
+        return ultra_model, graph_data, db_controller, queries, ground_truths
+    
+    def _run_baselines(self, skip_neo4j: bool, skip_ultra: bool, compute_scores_only: bool,
+                      db_controller, queries: List[str], ground_truths: List[List[int]],
+                      ultra_model, graph_data, static_threshold: float,
+                      scores_cache: Optional[List[Dict]], min_threshold: float,
+                      output_dir: str) -> Optional[Dict]:
+        """
+        Run Neo4j and/or Ultra baselines based on skip flags.
+        
+        Returns:
+            Dict with 'scores_cache' if compute_scores_only is True, None otherwise
+        """
+        # Run Neo4j baseline
+        if not skip_neo4j:
+            self.logger.info("\n" + "-"*80)
+            self.logger.info("Running Neo4j Symbolic Baseline")
+            self.logger.info("-"*80)
+            neo4j_results = self.run_neo4j_baseline(db_controller, queries, ground_truths)
+            self.results['neo4j_symbolic'].extend(neo4j_results)
+        
+        # Run Ultra baseline
+        if skip_ultra:
+            return None
+        
+        if compute_scores_only:
+            # Only compute scores, don't apply threshold
+            self.logger.info("\n" + "-"*80)
+            self.logger.info("Computing all Ultra scores")
+            self.logger.info("-"*80)
+            self.ultra_scores_cache = self.compute_ultra_scores(
+                ultra_model, queries, ground_truths, graph_data,
+                min_threshold=min_threshold,
+                batch_size=self.ultra_batch_size
+            )
+            
+            # Still save Neo4j results if we ran it
+            if not skip_neo4j:
+                self.save_results(output_dir, skip_neo4j=False)
+            
+            return {'scores_cache': self.ultra_scores_cache}
+        else:
+            # Apply threshold to scores (either from cache or compute on the fly)
+            self.logger.info("\n" + "-"*80)
+            self.logger.info("Running Ultra Neural Baseline")
+            self.logger.info("-"*80)
+            ultra_results = self.run_ultra_pipeline_baseline(
+                ultra_model, queries, ground_truths, graph_data, static_threshold,
+                batch_size=self.ultra_batch_size, scores_cache=scores_cache
+            )
+            self.results['ultra_neural'].extend(ultra_results)
+            return None
+    
+    def _resolve_load_path(self, load_path: Optional[str]) -> Optional[str]:
+        """Resolve load_path from provided value or auto-detect."""
         if load_path:
             return load_path
-        
-        if hasattr(inf_args, 'load_path') and inf_args.load_path:
-            return inf_args.load_path
-        
-        # Try config file
-        with open(args_file, 'r') as f:
-            config = json.load(f)
-        if 'inference_engine' in config and 'load_path' in config['inference_engine']:
-            config_path = config['inference_engine']['load_path']
-            # Handle relative paths
-            if config_path.startswith('./'):
-                parent_path = os.path.join('..', config_path[2:])
-                return parent_path if os.path.exists(parent_path) else config_path
-            return config_path
         
         # Auto-detect from snapshots
         for search_path in ["./artifacts/snapshots", "../artifacts/snapshots"]:
@@ -1143,10 +1261,7 @@ class BaselineRunner:
                     if "ultra_args.json" in files:
                         return root
         
-        raise FileNotFoundError(
-            "Could not find pretrained model. Please specify --load-path argument.\n"
-            "Available snapshots can be found in ./artifacts/snapshots/ or ../artifacts/snapshots/"
-        )
+        return None
     
     def compute_summary_stats(self, results: List[QueryResult]) -> Dict[str, float]:
         """Compute summary statistics from results, excluding queries with empty ground truth."""
@@ -1249,19 +1364,27 @@ class BaselineRunner:
             threshold_str = f"{self.ultra_threshold:.2f}" if self.ultra_threshold else "0.75"
             self._print_stats(f"Ultra Neural (threshold={threshold_str})", ultra_stats)
     
-    def run(self, args_file: str, output_dir: str, static_threshold: float = 0.75, 
-            load_path: str = None, skip_neo4j: bool = False, 
+    def run(self, output_dir: str, static_threshold: float = 0.75, 
+            load_path: str = None, device: str = "cuda",
+            neo4j_host: str = "localhost", neo4j_bolt_port: int = 7687,
+            node_unique_id: str = "id", relation_unique_id: str = "type",
+            skip_neo4j: bool = False, skip_ultra: bool = False,
             compute_scores_only: bool = False, scores_cache: Optional[List[Dict]] = None,
             min_threshold: float = 0.0):
         """
         Run both baselines on benchmark queries.
         
         Args:
-            args_file: Path to args JSON file for model setup
             output_dir: Directory to save results
             static_threshold: Threshold for Ultra neural baseline
-            load_path: Path to pretrained model directory (overrides config file)
+            load_path: Path to pretrained model directory
+            device: Device to use (cuda, cpu, mps)
+            neo4j_host: Neo4j host
+            neo4j_bolt_port: Neo4j bolt port
+            node_unique_id: Node unique identifier field
+            relation_unique_id: Relation unique identifier field
             skip_neo4j: If True, skip Neo4j baseline (only run Ultra)
+            skip_ultra: If True, skip Ultra baseline (only run Neo4j)
             compute_scores_only: If True, only compute scores (no threshold application)
             scores_cache: Pre-computed Ultra scores (from previous run)
             min_threshold: Minimum threshold for computing scores (to avoid computing for all nodes)
@@ -1278,100 +1401,23 @@ class BaselineRunner:
         self.logger.info(f"Ultra threshold: {static_threshold}")
         self.logger.info("="*80)
         
-        # Skip model/graph loading if we have cached scores AND skipping neo4j
-        # (only need to apply thresholds, no model inference or neo4j queries needed)
-        if scores_cache is not None and skip_neo4j:
-            self.logger.info("Using cached scores - skipping model/graph loading")
-            ultra_model = None
-            graph_data = None
-            db_controller = None
-            # Still load queries/ground_truths for compatibility (they're fast)
-            self.logger.info("Loading benchmark queries...")
-            self.logger.info(f"Loading from: {self.query_dir}")
-            queries = self.load_queries_from_dir()
-            ground_truths = self.load_ground_truth_from_dir()
-            min_len = min(len(queries), len(ground_truths))
-            queries, ground_truths = queries[:min_len], ground_truths[:min_len]
-            self.logger.info(f"Loaded {len(queries)} queries")
-        else:
-            # Setup models
-            self.logger.info("Setting up models...")
-            inf_args = merge_args(
-                parse_args_inference,
-                "args_file",
-                ["core", "inference_engine"],
-                ["--args_file", args_file]
-            )
-            
-            # Resolve load_path
-            inf_args.load_path = self._resolve_load_path(args_file, load_path, inf_args)
-            self.logger.info(f"Using load_path: {inf_args.load_path}")
-            
-            # Setup DB controller and models
-            db_controller = Neo4JBackendDBController(
-                f"neo4j://{inf_args.neo4j_host}:{inf_args.neo4j_bolt_port}",
-                inf_args.node_unique_id,
-                inf_args.relation_unique_id,
-            )
-            inf_args.db_controller = db_controller
-            
-            self.logger.info("Loading Ultra model...")
-            inf_args_ultra = argparse.Namespace(**vars(inf_args))
-            inf_args_ultra.model_to_infer = "ULTRA"
-            model_factory_ultra = ModelFactory(inf_args_ultra)
-            model_factory_ultra.prepare_model()
-            ultra_model = model_factory_ultra.model
-            
-            self.logger.info("Loading graph data...")
-            graph_data = get_graph(db_controller, inf_args.device)
-            
-            # Load queries
-            self.logger.info("Loading benchmark queries...")
-            self.logger.info(f"Loading from: {self.query_dir}")
-            queries = self.load_queries_from_dir()
-            ground_truths = self.load_ground_truth_from_dir()
-            min_len = min(len(queries), len(ground_truths))
-            queries, ground_truths = queries[:min_len], ground_truths[:min_len]
-            self.logger.info(f"Loaded {len(queries)} queries")
+        # Load models and queries
+        ultra_model, graph_data, db_controller, queries, ground_truths = self._load_models_and_queries(
+            load_path, device, neo4j_host, neo4j_bolt_port,
+            node_unique_id, relation_unique_id, scores_cache, skip_neo4j, skip_ultra
+        )
                 
         # Run baselines
-        if not skip_neo4j:
-                self.logger.info("\n" + "-"*80)
-                self.logger.info("Running Neo4j Symbolic Baseline")
-                self.logger.info("-"*80)
-                neo4j_results = self.run_neo4j_baseline(db_controller, queries, ground_truths)
-                self.results['neo4j_symbolic'].extend(neo4j_results)
-        else:
-            self.logger.info("\nSkipping Neo4j baseline (already run)")
-                
-                # Run Ultra baseline
-        if compute_scores_only:
-            # Only compute scores, don't apply threshold
-            self.logger.info("\n" + "-"*80)
-            self.logger.info("Computing all Ultra scores")
-            self.logger.info("-"*80)
-            self.ultra_scores_cache = self.compute_ultra_scores(
-                ultra_model, queries, ground_truths, graph_data,
-                min_threshold=min_threshold,
-                batch_size=self.ultra_batch_size
-            )
-            # Scores cache kept in memory only (not written to disk)
-            
-            # Still save Neo4j results if we ran it
-            if not skip_neo4j:
-                self.save_results(output_dir, skip_neo4j=False)
-            
-            return {'scores_cache': self.ultra_scores_cache}
-        else:
-            # Apply threshold to scores (either from cache or compute on the fly)
-            self.logger.info("\n" + "-"*80)
-            self.logger.info("Running Ultra Neural Baseline")
-            self.logger.info("-"*80)
-            ultra_results = self.run_ultra_pipeline_baseline(
-                ultra_model, queries, ground_truths, graph_data, static_threshold,
-                batch_size=self.ultra_batch_size, scores_cache=scores_cache
-            )
-            self.results['ultra_neural'].extend(ultra_results)
+        result = self._run_baselines(
+            skip_neo4j, skip_ultra, compute_scores_only,
+            db_controller, queries, ground_truths,
+            ultra_model, graph_data, static_threshold,
+            scores_cache, min_threshold, output_dir
+        )
+        
+        # If compute_scores_only, return early (results already saved if needed)
+        if result is not None:
+            return result
         
         # Save results
         self.logger.info("\n" + "="*80)
@@ -1382,25 +1428,178 @@ class BaselineRunner:
         return self.results
 
 
+def _get_repo_root() -> str:
+    """Get the repository root directory."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(script_dir)
+
+
+def _get_model_from_query_dir(query_dir: str) -> str:
+    """
+    Extract model name from query directory path.
+    
+    Maps:
+    - 3p_pipeline → ThreeHopPipeline
+    - 2u_pipeline → TwoUnionPipeline
+    - 2ip_pipeline → TwoIntersectProjectPipeline
+    """
+    query_type_to_model = {
+        "3p_pipeline": "ThreeHopPipeline",
+        "2u_pipeline": "TwoUnionPipeline",
+        "2ip_pipeline": "TwoIntersectProjectPipeline",
+    }
+    
+    for query_type, model_name in query_type_to_model.items():
+        if query_dir.endswith(query_type):
+            return model_name
+    
+    # Fallback: try to extract from path
+    basename = os.path.basename(query_dir.rstrip('/'))
+    if basename in query_type_to_model:
+        return query_type_to_model[basename]
+    
+    # Default fallback
+    return "UnknownModel"
+
+
+def _setup_output_directory(output_dir: str, dataset: str = None, 
+                           baseline_type: str = None, model_to_infer: str = None,
+                           incompleteness: int = None) -> str:
+    """
+    Setup output directory path.
+    
+    If output_dir is None, constructs it from dataset, baseline_type, model_to_infer, and incompleteness.
+    Otherwise, resolves relative paths to be relative to repo root.
+    
+    Format: <baseline_name>_bench_<dataset>_<model_to_infer>_<incompleteness>
+    """
+    repo_root = _get_repo_root()
+    
+    if output_dir is None:
+        if not all([dataset, baseline_type, model_to_infer, incompleteness is not None]):
+            raise ValueError("dataset, baseline_type, model_to_infer, and incompleteness are required when output_dir is not provided")
+        
+        folder_name = f"{baseline_type}_bench_{dataset}_{model_to_infer}_{incompleteness}"
+        benchmark_dir = os.path.join(repo_root, "artifacts", "benchmark")
+        os.makedirs(benchmark_dir, exist_ok=True)
+        return os.path.join(benchmark_dir, folder_name)
+    
+    # Resolve relative paths
+    if not os.path.isabs(output_dir):
+        return os.path.join(repo_root, output_dir)
+    
+    return output_dir
+
+
+def _get_skip_flags_from_baseline_type(baseline_type: str) -> Tuple[bool, bool]:
+    """
+    Get skip_neo4j and skip_ultra flags based on baseline type.
+    
+    Returns:
+        Tuple of (skip_neo4j, skip_ultra)
+    """
+    baseline_configs = {
+        "neural": (True, False),   # Skip Neo4j, run Ultra
+        "symbolic": (False, True),  # Run Neo4j, skip Ultra
+    }
+    return baseline_configs.get(baseline_type, (False, False))
+
+
+def _print_configuration(dataset: str = None, baseline_type: str = None, 
+                        incompleteness: int = None, output_dir: str = None,
+                        model_to_infer: str = None):
+    """Print benchmark configuration."""
+    print("="*80)
+    print("BASELINE BENCHMARK RUNNER")
+    print("="*80)
+    if dataset:
+        print(f"Dataset: {dataset}")
+    if baseline_type:
+        print(f"Baseline type: {baseline_type}")
+    if model_to_infer:
+        print(f"Model to infer: {model_to_infer}")
+    if incompleteness is not None:
+        print(f"Incompleteness level: {incompleteness}%")
+    if output_dir:
+        print(f"Output directory: {output_dir}")
+    print("="*80)
+    print()
+
+
+def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool, skip_ultra: bool):
+    """Run benchmarks with multiple thresholds (compute scores once, apply all thresholds)."""
+    # Compute scores once
+    result = runner.run(
+        output_dir=args.output_dir,
+        static_threshold=args.ultra_thresholds[0],  # Dummy, will be overridden
+        load_path=args.load_path,
+        device=args.device,
+        neo4j_host=args.neo4j_host,
+        neo4j_bolt_port=args.neo4j_bolt_port,
+        node_unique_id=args.node_unique_id,
+        relation_unique_id=args.relation_unique_id,
+        skip_neo4j=skip_neo4j,
+        skip_ultra=skip_ultra,
+        compute_scores_only=True,
+        min_threshold=args.min_threshold
+    )
+    scores_cache = result.get('scores_cache')
+    
+    # Apply each threshold
+    for threshold in args.ultra_thresholds:
+        threshold_output_dir = os.path.join(args.output_dir, f"threshold_{threshold}")
+        runner.results['ultra_neural'] = []  # Clear previous results
+        runner.run(
+            output_dir=threshold_output_dir,
+            static_threshold=threshold,
+            load_path=args.load_path,
+            device=args.device,
+            neo4j_host=args.neo4j_host,
+            neo4j_bolt_port=args.neo4j_bolt_port,
+            node_unique_id=args.node_unique_id,
+            relation_unique_id=args.relation_unique_id,
+            skip_neo4j=True,  # Skip Neo4j for threshold subdirectories
+            skip_ultra=skip_ultra,
+            scores_cache=scores_cache,
+            min_threshold=args.min_threshold
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run baseline benchmarks for comparison with ThreeHopPipeline"
     )
-    parser.add_argument("--args_file", type=str, required=True,
-                       help="Path to orb config JSON file")
     parser.add_argument("--query-dir", type=str, 
                        default="../queries/test/3p_pipeline",
                        help="Directory containing test queries (default: ../queries/test/3p_pipeline)")
     parser.add_argument("--max-queries", type=int, default=1000,
                        help="Maximum number of queries to process")
-    parser.add_argument("--output-dir", type=str, required=True,
-                       help="Output directory for results")
+    parser.add_argument("--output-dir", type=str, default=None,
+                       help="Output directory for results (default: artifacts/benchmark/<baseline_type>_bench_<dataset>_<model_to_infer>_<incompleteness>)")
+    parser.add_argument("--dataset", type=str, default=None,
+                       choices=["fb15k-237", "nell-955", "yago310"],
+                       help="Dataset name: fb15k-237, nell-955, or yago310")
+    parser.add_argument("--baseline-type", type=str, default=None,
+                       choices=["neural", "symbolic"],
+                       help="Baseline type: neural (Ultra) or symbolic (Neo4j)")
+    parser.add_argument("--incompleteness", type=int, default=None,
+                       help="Data incompleteness level (e.g., 20 for 20% missing)")
     parser.add_argument("--ultra-threshold", type=float, default=0.75,
                        help="Static threshold for Ultra neural baseline")
     parser.add_argument("--ultra-batch-size", type=int, default=4,
                        help="Batch size for Ultra intermediate hops (to avoid GPU OOM, default: 16)")
     parser.add_argument("--load-path", type=str, default=None,
-                       help="Path to pretrained model directory (overrides config file)")
+                       help="Path to pretrained model directory (required for Ultra baseline)")
+    parser.add_argument("--device", type=str, default="cuda",
+                       help="Device to use (cuda, cpu, mps)")
+    parser.add_argument("--neo4j-host", type=str, default="localhost",
+                       help="Neo4j host (default: localhost)")
+    parser.add_argument("--neo4j-bolt-port", type=int, default=7687,
+                       help="Neo4j bolt port (default: 7687)")
+    parser.add_argument("--node-unique-id", type=str, default="id",
+                       help="Node unique identifier field (default: id)")
+    parser.add_argument("--relation-unique-id", type=str, default="type",
+                       help="Relation unique identifier field (default: type)")
     parser.add_argument("--skip-neo4j", action="store_true",
                        help="Skip Neo4j baseline (only run Ultra)")
     parser.add_argument("--compute-scores-only", action="store_true",
@@ -1412,49 +1611,48 @@ def main():
     
     args = parser.parse_args()
     
+    # Extract model name from query directory
+    model_to_infer = _get_model_from_query_dir(args.query_dir) if args.query_dir else None
+    
+    # Setup output directory
+    try:
+        args.output_dir = _setup_output_directory(
+            args.output_dir, args.dataset, args.baseline_type, model_to_infer, args.incompleteness
+        )
+    except ValueError as e:
+        parser.error(str(e))
+    
+    # Set skip flags based on baseline type
+    skip_neo4j, skip_ultra = _get_skip_flags_from_baseline_type(args.baseline_type) if args.baseline_type else (args.skip_neo4j, False)
+    if args.baseline_type:
+        args.skip_neo4j = skip_neo4j
+    
+    # Print configuration
+    _print_configuration(args.dataset, args.baseline_type, args.incompleteness, args.output_dir, model_to_infer)
+    
     # Create baseline runner
     runner = BaselineRunner(
-        config_path=args.args_file,
+        config_path=None,  # No longer needed
         query_dir=args.query_dir,
         max_queries=args.max_queries,
         ultra_batch_size=args.ultra_batch_size
     )
     
-    # If thresholds provided via --ultra-thresholds, compute scores once and apply all thresholds
+    # Run benchmarks
     if args.ultra_thresholds and len(args.ultra_thresholds) >= 1:
-        # Compute scores once
-        result = runner.run(
-            args_file=args.args_file,
-            output_dir=args.output_dir,
-            static_threshold=args.ultra_thresholds[0],  # Dummy, will be overridden
-            load_path=args.load_path,
-            skip_neo4j=args.skip_neo4j,
-            compute_scores_only=True,
-            min_threshold=args.min_threshold
-        )
-        scores_cache = result.get('scores_cache')
-        
-        # Apply each threshold
-        for threshold in args.ultra_thresholds:
-            threshold_output_dir = os.path.join(args.output_dir, f"threshold_{threshold}")
-            runner.results['ultra_neural'] = []  # Clear previous results
-            runner.run(
-                args_file=args.args_file,
-                output_dir=threshold_output_dir,
-                static_threshold=threshold,
-                load_path=args.load_path,
-                skip_neo4j=True,
-                scores_cache=scores_cache,
-                min_threshold=args.min_threshold
-            )
+        _run_with_multiple_thresholds(runner, args, args.skip_neo4j, skip_ultra)
     else:
-        # Single threshold or compute-scores-only mode (using --ultra-threshold)
         runner.run(
-            args_file=args.args_file,
             output_dir=args.output_dir,
             static_threshold=args.ultra_threshold,
             load_path=args.load_path,
+            device=args.device,
+            neo4j_host=args.neo4j_host,
+            neo4j_bolt_port=args.neo4j_bolt_port,
+            node_unique_id=args.node_unique_id,
+            relation_unique_id=args.relation_unique_id,
             skip_neo4j=args.skip_neo4j,
+            skip_ultra=skip_ultra,
             compute_scores_only=args.compute_scores_only,
             min_threshold=args.min_threshold
         )
