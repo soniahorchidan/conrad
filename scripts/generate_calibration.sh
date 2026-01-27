@@ -187,31 +187,51 @@ log INFO "Importing fresh dataset into Neo4j"
 
 start_neo4j
 
-log INFO "Adding inverse relations"
-# NELL955 already has inverse relations, so skip adding them
-if [ "${DATASET}" != "nell-955" ]; then
-    NUM_RELATIONS=$(get_num_relations 2>&1 | grep -E '^[0-9]+$' | tail -n 1)
-    log INFO "Using inverse relation offset: ${NUM_RELATIONS}"
-    echo "MATCH (a:Entity)-[r:Relation]->(b:Entity) MERGE (b)-[:Relation {type: r.type + ${NUM_RELATIONS}}]->(a);" | "${CYPHER_SHELL_BASE[@]}"
-else
-    log INFO "Skipping inverse relation creation for ${DATASET} (already has inverse relations)"
+# log INFO "Adding inverse relations"
+# # NELL955 already has inverse relations, so skip adding them
+# if [ "${DATASET}" != "nell-955" ]; then
+#     NUM_RELATIONS=$(get_num_relations 2>&1 | grep -E '^[0-9]+$' | tail -n 1)
+#     log INFO "Using inverse relation offset: ${NUM_RELATIONS}"
+#     echo "MATCH (a:Entity)-[r:Relation]->(b:Entity) MERGE (b)-[:Relation {type: r.type + ${NUM_RELATIONS}}]->(a);" | "${CYPHER_SHELL_BASE[@]}"
+# else
+#     log INFO "Skipping inverse relation creation for ${DATASET} (already has inverse relations)"
+# fi
+
+log INFO "Skipping adding inverse relations"
+
+# Check if queries already exist
+QUERIES_EXIST=true
+if [ ! -f "${CALIBRATION_BASE_DIR}/3p_pipeline/queries.pkl" ] || \
+   [ ! -f "${CALIBRATION_BASE_DIR}/2ip_pipeline/queries.pkl" ] || \
+   [ ! -f "${CALIBRATION_BASE_DIR}/2u_pipeline/queries.pkl" ] || \
+   [ ! -d "${TEST_BASE_DIR}/3p_pipeline/queries" ] || \
+   [ -z "$(ls -A "${TEST_BASE_DIR}/3p_pipeline/queries" 2>/dev/null)" ] || \
+   [ ! -d "${TEST_BASE_DIR}/2ip_pipeline/queries" ] || \
+   [ -z "$(ls -A "${TEST_BASE_DIR}/2ip_pipeline/queries" 2>/dev/null)" ] || \
+   [ ! -d "${TEST_BASE_DIR}/2u_pipeline/queries" ] || \
+   [ -z "$(ls -A "${TEST_BASE_DIR}/2u_pipeline/queries" 2>/dev/null)" ]; then
+    QUERIES_EXIST=false
 fi
 
-log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
-mkdir -p "${CRC_DATA_DIR}"
-python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
-    --generate-3p \
-    --generate-2ip \
-    --generate-2u \
-    --num-queries 2000 \
-    --num-2ip-queries 2000 \
-    --num-2u-queries 2000 \
-    --size-ratio 1.0 \
-    --max-hop-size 50 \
-    --extract-intermediate \
-    --calib-split 0.5 \
-    --test-path "${TEST_BASE_DIR}" \
-    --calib-path "${CALIBRATION_BASE_DIR}"
+if [ "$QUERIES_EXIST" = true ]; then
+    log INFO "Queries already exist in ${CRC_DATA_DIR}, skipping generation"
+else
+    log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
+    mkdir -p "${CRC_DATA_DIR}"
+    python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
+        --generate-3p \
+        --generate-2ip \
+        --generate-2u \
+        --num-queries 4000 \
+        --num-2ip-queries 4000 \
+        --num-2u-queries 4000 \
+        --size-ratio 1.0 \
+        --max-hop-size 50 \
+        --extract-intermediate \
+        --calib-split 0.5 \
+        --test-path "${TEST_BASE_DIR}" \
+        --calib-path "${CALIBRATION_BASE_DIR}"
+fi
 
 log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
 python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"

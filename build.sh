@@ -2,26 +2,17 @@
 
 set -e
 
-# import constants
-if [ -f ./constants.env ]; then
-    env_file=./constants.env
-else
-    env_file=scripts/constants.env
-fi
+# Get script directory for resolving paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-while IFS='=' read -r key value
-do
-    # Skip lines that are empty or do not contain '='
-    if [[ -z "$key" || -z "$value" || "$key" =~ ^\s*# ]]; then
-        continue
-    fi
-
-    # check if the variable is already set
-    if [ -z "${!key}" ]; then
-        eval "$key=$value"
-        echo "Setting $key=$value"
-    fi
-done < "$env_file"
+# Set defaults if variables aren't set
+DATA_PATH="${DATA_PATH:-./artifacts/data}"
+DATABASES_PATH="${DATABASES_PATH:-./artifacts/databases}"
+NEO4J_CONTAINER="${NEO4J_CONTAINER:-neo4j_orb}"
+LOCAL_NEO4J_PATH="${LOCAL_NEO4J_PATH:-./external/}"
+MAKE_JOBS="${MAKE_JOBS:-4}"
+NEO4J_USERNAME="${NEO4J_USERNAME:-neo4j}"
+NEO4J_PASSWORD="${NEO4J_PASSWORD:-password123}"
 
 get_orb_config() {
     # read priority: input parameter -> ./orb_config.json.local -> ./config/config.json

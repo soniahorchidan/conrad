@@ -1,7 +1,10 @@
 #!/bin/bash
 
-# import constants
-. ./scripts/constants.env
+# Get script directory for resolving paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Set defaults if not set
+LOCAL_NEO4J_PATH="${LOCAL_NEO4J_PATH:-./external/}"
 
 create_directory() {
     local dir="$1"

@@ -31,11 +31,9 @@ class MultiHopPredictor(nn.Module):
             """
             neo_mask = neo_scores > 0
             
-            # Normalize Neo4j to [0.5, 1.0] globally
-            neo_global_max = 1.0 
-            neo_norm = torch.clamp(neo_scores / neo_global_max, 0, 1.0)
-            # Using sqrt helps spread out the high-confidence scores
-            neo_final = 0.5 + (torch.sqrt(neo_norm) * 0.499) 
+            # Neo4j scores are already in [0.5, 1.0] typically, but can be lower if popularity data is missing.
+            # Clamp to [0.5, 1.0] to ensure they stay above ULTRA scores [0, 0.499]
+            neo_final = torch.clamp(neo_scores, min_neo4j, 1.0) 
             
             # Normalize ULTRA to [0, 0.499] globally
             ultra_final = ultra_scores * 0.499
