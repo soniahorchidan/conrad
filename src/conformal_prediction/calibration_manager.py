@@ -4,11 +4,9 @@ Calibration management for conformal risk control.
 import numpy as np
 import torch
 import logging
-from typing import List, Dict, Any, Optional, Union
-from scipy.optimize import brentq
+from typing import List, Dict, Any, Optional
 from .vector_optimizer import VectorOptimizer
-from .utils import get_alpha_bounds, lamhat_threshold, validate_calibration_data
-from .model_config import ModelConfig
+from .utils import get_alpha_bounds, validate_calibration_data
 
 # Model name to query type mapping
 MODEL_TO_QUERY_TYPE = {
@@ -51,7 +49,8 @@ class CalibrationManager:
                 or default to 14541 (fb15k-237).
         """
         self.model_name = model_name
-        self.is_vector_model = ModelConfig.is_vector_model(model_name)
+        # This project only supports vector models / vector optimization.
+        self.is_vector_model = True
         self.num_entities = num_entities  # Will be set from model if available
 
     def compute_statistics(self, cal_scores: List) -> Dict[str, np.ndarray]:
@@ -99,16 +98,10 @@ class CalibrationManager:
         # Old format
         cal_scores_array = np.array(cal_scores)
         
-        if self.is_vector_model:
-            # For vector models, compute statistics per hop
-            median_scores = np.median(cal_scores_array, axis=(0, 2))
-            mean_scores = np.mean(cal_scores_array, axis=(0, 2))
-            var_scores = np.var(cal_scores_array, axis=(0, 2))
-        else:
-            # For scalar models, compute overall statistics
-            median_scores = np.median(cal_scores_array)
-            mean_scores = np.mean(cal_scores_array)
-            var_scores = np.var(cal_scores_array)
+        # Vector models: compute statistics per hop/component
+        median_scores = np.median(cal_scores_array, axis=(0, 2))
+        mean_scores = np.mean(cal_scores_array, axis=(0, 2))
+        var_scores = np.var(cal_scores_array, axis=(0, 2))
 
         return {
             "median": median_scores,
@@ -122,8 +115,7 @@ class CalibrationManager:
         """
         Precalibrate thresholds for common error levels.
         
-        For vector models, uses batch optimization (much faster than sequential).
-        For scalar models, falls back to sequential optimization.
+        This project only supports batch vector optimization.
         
         Args:
             cal_scores: Calibration scores
@@ -136,21 +128,17 @@ class CalibrationManager:
         if alphas is None:
             alphas = np.arange(0.1, 0.51, 0.1)
         
-        # For vector models, use batch optimization (much faster!)
-        if self.is_vector_model:
-            try:
-                validate_calibration_data(cal_scores, true_labels)
-                query_type = get_query_type_from_model(self.model_name)
-                optimizer = VectorOptimizer(
-                    cal_scores, true_labels, query_type=query_type, 
-                    num_entities=self.num_entities
-                )
-                precalibrated_thresholds = optimizer.optimize_thresholds_batch(alphas)
-                logging.info(f"Batch calibration for alphas {alphas} done!")
-                return precalibrated_thresholds
-            except Exception as e:
-                logging.warning(f"Batch calibration failed: {e}. Falling back to sequential.")
-                raise e
+        validate_calibration_data(cal_scores, true_labels)
+        query_type = get_query_type_from_model(self.model_name)
+        optimizer = VectorOptimizer(
+            cal_scores,
+            true_labels,
+            query_type=query_type,
+            num_entities=self.num_entities,
+        )
+        precalibrated_thresholds = optimizer.optimize_thresholds_batch(alphas)
+        logging.info(f"Batch calibration for alphas {alphas} done!")
+        return precalibrated_thresholds
 
     def create_metadata(self, cal_scores: List, true_labels: List) -> Dict[str, Any]:
         """
@@ -170,40 +158,28 @@ class CalibrationManager:
         # Precalibrate thresholds
         precalibrated_thresholds = self.precalibrate_thresholds(cal_scores, true_labels)
 
-        # Create metadata based on model type
-        if self.is_vector_model:
-            # Track number of components (3p has 3 hops, 2u has 2 branches) for downstream consumers.
-            try:
-                query_type = get_query_type_from_model(self.model_name)
-                num_components = 2 if query_type == "2u" else 3
-            except Exception:
-                num_components = 3
+        # Track number of components (3p has 3 hops, 2u has 2 branches) for downstream consumers.
+        try:
+            query_type = get_query_type_from_model(self.model_name)
+            num_components = 2 if query_type == "2u" else 3
+        except Exception:
+            num_components = 3
 
-            # Convert to list if it's a numpy array, otherwise use as-is (for scalars)
-            median_val = stats["median"].tolist() if hasattr(stats["median"], "tolist") else stats["median"]
-            mean_val = stats["mean"].tolist() if hasattr(stats["mean"], "tolist") else stats["mean"]
-            var_val = stats["var"].tolist() if hasattr(stats["var"], "tolist") else stats["var"]
-            
-            return {
-                "median_non_conformity_score": median_val,
-                "mean_non_conformity_score": mean_val,
-                "variance_non_conformity": var_val,
-                "alpha_lowerbound": alpha_lowerbound,
-                "alpha_upperbound": alpha_upperbound,
-                "calibrated_alphas": precalibrated_thresholds,
-                "vector_scores": True,
-                "num_hops": num_components
-            }
-        else:
-            return {
-                "median_non_conformity_score": float(stats["median"]),
-                "mean_non_conformity_score": float(stats["mean"]),
-                "variance_non_conformity": float(stats["var"]),
-                "alpha_lowerbound": alpha_lowerbound,
-                "alpha_upperbound": alpha_upperbound,
-                "calibrated_alphas": precalibrated_thresholds,
-                "vector_scores": False
-            }
+        # Convert to list if it's a numpy array, otherwise use as-is
+        median_val = stats["median"].tolist() if hasattr(stats["median"], "tolist") else stats["median"]
+        mean_val = stats["mean"].tolist() if hasattr(stats["mean"], "tolist") else stats["mean"]
+        var_val = stats["var"].tolist() if hasattr(stats["var"], "tolist") else stats["var"]
+        
+        return {
+            "median_non_conformity_score": median_val,
+            "mean_non_conformity_score": mean_val,
+            "variance_non_conformity": var_val,
+            "alpha_lowerbound": alpha_lowerbound,
+            "alpha_upperbound": alpha_upperbound,
+            "calibrated_alphas": precalibrated_thresholds,
+            "vector_scores": True,
+            "num_hops": num_components,
+        }
 
     def calibrate(self, cal_scores: List, true_labels: List) -> Dict[str, Any]:
         """
@@ -216,8 +192,7 @@ class CalibrationManager:
         Returns:
             Calibration metadata
         """        
-        if self.is_vector_model:
-            validate_calibration_data(cal_scores, true_labels)
+        validate_calibration_data(cal_scores, true_labels)
 
         metadata = self.create_metadata(cal_scores, true_labels)
         return metadata
@@ -236,14 +211,16 @@ class CalibrationManager:
         """
         logging.info(f"Optimizing for alpha {alpha:.2f} with correct FNR for model {self.model_name}")
         
-        if self.is_vector_model:
-            validate_calibration_data(cal_scores, true_labels)
-            query_type = get_query_type_from_model(self.model_name)
-            optimizer = VectorOptimizer(cal_scores, true_labels, query_type=query_type)
-            thresholds = optimizer.optimize_thresholds(alpha)
-            logging.info(f"Vector conformal risk control calibration for alpha {alpha:.2f} done! thresholds={thresholds}")
-        else:
-            thresholds = brentq(lamhat_threshold, 0, 1, args=(cal_scores, true_labels, alpha))
-            logging.info(f"Calibrating for alpha {alpha:.2f} done! thresholds={thresholds}")
+        validate_calibration_data(cal_scores, true_labels)
+        query_type = get_query_type_from_model(self.model_name)
+        optimizer = VectorOptimizer(
+            cal_scores,
+            true_labels,
+            query_type=query_type,
+            num_entities=self.num_entities,
+        )
+        thresholds_dict = optimizer.optimize_thresholds_batch([alpha])
+        thresholds = next(iter(thresholds_dict.values()))
+        logging.info(f"Vector conformal risk control calibration for alpha {alpha:.2f} done! thresholds={thresholds}")
         
         return thresholds

@@ -15,7 +15,6 @@ class ThreeHopPipeline(BasePipeline):
     def __init__(self, ultra_model, dbexec_model, args: Namespace, device: str):
         super().__init__(ultra_model, dbexec_model, args, device)
         self.max_internal_batch = getattr(args, 'max_internal_batch', 64)
-        self.multihop_slack = 0.1
 
     @torch.no_grad()
     def predict(self, query: torch.Tensor, confidence: float, graph_data: Any) -> Optional[List]:
@@ -108,8 +107,19 @@ class ThreeHopPipeline(BasePipeline):
     def predict_with_thresholds(self, query: torch.Tensor, lamhat: List[float], graph_data: Any,
                                ground_truth_hops: Optional[List[Dict]] = None) -> List[List[int]]:
         """Run cascade inference with threshold-based filtering at each hop."""
-        batch_results = self._predict(query, lamhat, graph_data, ground_truth_hops)
-        return [result["hop3"]["nodes"] for result in batch_results]
+        # Inference only needs hop3 nodes; avoid carrying around dense per-path score tensors.
+        hop1_results = self._process_hop1(
+            query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None, keep_scores=False
+        )
+        hop2_results = self._process_hop2(
+            hop1_results, query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None,
+            keep_path_scores=False,
+        )
+        hop3_results = self._process_hop3(
+            hop2_results, query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None,
+            keep_path_scores=False,
+        )
+        return hop3_results["nodes"]
     
     @torch.no_grad()
     def _predict(self, query: torch.Tensor, lamhat: List[float], graph_data: Any, 
@@ -117,21 +127,33 @@ class ThreeHopPipeline(BasePipeline):
         """Internal method that performs multi-hop cascade prediction."""
         if query.dim() == 1:
             query = query.unsqueeze(0)
+
+        # Avoid CUDA synchronization from Python `.item()` in control-flow below.
+        # Keep a CPU view for extracting ints while still running scoring on GPU.
+        query_cpu = query.detach().cpu() if isinstance(query, torch.Tensor) and query.is_cuda else query
         
         use_ground_truth = ground_truth_hops is not None
         batch_size = query.shape[0]
         
-        hop1_results = self._process_hop1(query, lamhat, graph_data, ground_truth_hops, use_ground_truth)
-        hop2_results = self._process_hop2(hop1_results, query, lamhat, graph_data, ground_truth_hops, use_ground_truth)
-        hop3_results = self._process_hop3(hop2_results, query, lamhat, graph_data, ground_truth_hops, use_ground_truth)
+        hop1_results = self._process_hop1(
+            query_cpu, lamhat, graph_data, ground_truth_hops, use_ground_truth, keep_scores=True
+        )
+        hop2_results = self._process_hop2(
+            hop1_results, query_cpu, lamhat, graph_data, ground_truth_hops, use_ground_truth, keep_path_scores=True
+        )
+        hop3_results = self._process_hop3(
+            hop2_results, query_cpu, lamhat, graph_data, ground_truth_hops, use_ground_truth, keep_path_scores=True
+        )
         
         return self._aggregate_batch_results(hop1_results, hop2_results, hop3_results, batch_size)
     
     def _process_hop1(self, query: torch.Tensor, lamhat: List[float], graph_data: Any, 
-                     ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool) -> Dict[str, Any]:
+                     ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
+                     keep_scores: bool = True) -> Dict[str, Any]:
         """Process hop 1 for all queries in batch, batching queries with same relation type for efficiency."""
         batch_size = query.shape[0]
-        all_nodes, all_scores = [None] * batch_size, [None] * batch_size
+        all_nodes = [None] * batch_size
+        all_scores = [None] * batch_size if keep_scores else None
         
         threshold = self._get_threshold(lamhat, 0)
         
@@ -159,41 +181,52 @@ class ThreeHopPipeline(BasePipeline):
                 nodes = self._extract_nodes_from_scores(scores, threshold)
                 
                 if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, orig_idx, 1):
-                    scores_np = scores.squeeze(0).cpu().numpy()
-                    nodes = self._apply_gt_filtering(nodes, scores_np, ground_truth_hops[orig_idx][1], max_nodes=50)
+                    nodes = self._apply_gt_filtering(nodes, scores.squeeze(0), ground_truth_hops[orig_idx][1], max_nodes=50)
                 
                 all_nodes[orig_idx] = nodes
-                all_scores[orig_idx] = scores
+                if keep_scores:
+                    all_scores[orig_idx] = scores
         
-        return {"nodes": all_nodes, "scores": all_scores}
+        if keep_scores:
+            return {"nodes": all_nodes, "scores": all_scores}
+        return {"nodes": all_nodes}
     
     def _process_hop2(self, hop1_results: Dict[str, Any], query: torch.Tensor, lamhat: List[float], 
-                     graph_data: Any, ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool) -> Dict[str, Any]:
+                     graph_data: Any, ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
+                     keep_path_scores: bool = True) -> Dict[str, Any]:
         """Process hop 2 for all queries in batch using MAX-then-threshold aggregation."""
         return self._process_multi_source_hop(
             hop_num=2, prev_results=hop1_results, query=query, 
             relation_idx=2, lamhat=lamhat, graph_data=graph_data,
-            ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth
+            ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth,
+            keep_path_scores=keep_path_scores,
         )
     
     def _process_hop3(self, hop2_results: Dict[str, Any], query: torch.Tensor, lamhat: List[float], 
-                     graph_data: Any, ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool) -> Dict[str, Any]:
+                     graph_data: Any, ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
+                     keep_path_scores: bool = True) -> Dict[str, Any]:
         """Process hop 3 for all queries in batch using MAX-then-threshold aggregation."""
         return self._process_multi_source_hop(
             hop_num=3, prev_results=hop2_results, query=query, 
             relation_idx=3, lamhat=lamhat, graph_data=graph_data,
             ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth,
-            parent_map_builder=lambda i: self._build_hop2_to_hop1_map(
-                hop2_results.get("scores", [])[i] if hop2_results.get("path_aware") else [],
-                lamhat
-            )
+            keep_path_scores=keep_path_scores,
+            parent_map_builder=(
+                (lambda i: self._build_hop2_to_hop1_map(
+                    hop2_results.get("scores", [])[i] if hop2_results.get("path_aware") else [],
+                    lamhat
+                ))
+                if keep_path_scores
+                else None
+            ),
         )
     
     def _process_multi_source_hop(self, hop_num: int, prev_results: Dict[str, Any], 
                                    query: torch.Tensor, relation_idx: int, lamhat: List[float],
                                    graph_data: Any, ground_truth_hops: Optional[List[Dict]], 
                                    use_ground_truth: bool, 
-                                   parent_map_builder: Optional[callable] = None) -> Dict[str, Any]:
+                                   parent_map_builder: Optional[callable] = None,
+                                   keep_path_scores: bool = True) -> Dict[str, Any]:
         """Unified processing for hop2 and hop3 (multi-source hops)."""
         batch_size = query.shape[0]
         all_nodes, all_scores = [], []
@@ -201,31 +234,38 @@ class ThreeHopPipeline(BasePipeline):
         for i in range(batch_size):
             source_nodes = list(prev_results["nodes"][i]) if prev_results["nodes"][i] else []
             relation = query[i, relation_idx].item()
-            parent_map = parent_map_builder(i) if parent_map_builder else None
+            parent_map = parent_map_builder(i) if (keep_path_scores and parent_map_builder) else None
             
-            path_scores, _, filtered_nodes = self._process_hop_generic(
+            path_scores, filtered_nodes = self._process_hop_generic(
                 hop_num=hop_num, source_nodes=source_nodes, relation=relation, query_idx=i,
                 lamhat=lamhat, graph_data=graph_data, 
                 ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth,
-                parent_map=parent_map
+                parent_map=parent_map,
+                keep_path_scores=keep_path_scores,
             )
             
             all_nodes.append(list(filtered_nodes))
-            all_scores.append(path_scores)
+            if keep_path_scores:
+                all_scores.append(path_scores)
         
-        return {"nodes": all_nodes, "scores": all_scores, "path_aware": True}
+        if keep_path_scores:
+            return {"nodes": all_nodes, "scores": all_scores, "path_aware": True}
+        return {"nodes": all_nodes}
     
-    # TODO(sonia): simplify this method. I remember some process_hop_* methods that might contain similar logic.
+    # Generic hop processing used by hop2/hop3. Keeps path-aware scores for calibration,
+    # but avoids materializing a giant list of score tensors by computing a running MAX.
     def _process_hop_generic(self, hop_num: int, source_nodes: List[int], relation: int, 
                             query_idx: int, lamhat: List[float], graph_data: Any,
                             ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
-                            parent_map: Optional[Dict] = None) -> Tuple[List[Dict], List[torch.Tensor], set]:
-        """Generic hop processing that handles chunking, aggregation, and GT filtering."""
+                            parent_map: Optional[Dict] = None,
+                            keep_path_scores: bool = True) -> Tuple[List[Dict], set]:
+        """Chunked hop processing with running MAX + optional GT filtering."""
         if not source_nodes:
-            return [], [], set()
+            return [], set()
         
-        path_scores, score_tensors = [], []
+        path_scores: List[Dict] = [] if keep_path_scores else []
         threshold = self._get_threshold(lamhat, hop_num - 1)
+        max_scores: Optional[torch.Tensor] = None
         
         # Process sources in chunks to avoid GPU OOM
         for chunk_start in range(0, len(source_nodes), self.max_internal_batch):
@@ -237,30 +277,43 @@ class ThreeHopPipeline(BasePipeline):
             
             for idx, source in enumerate(chunk_nodes):
                 scores = batch_scores[idx:idx+1]
+                scores_1d = scores.squeeze(0)
                 
                 # Track parent info for path awareness
-                if parent_map and source in parent_map:
-                    # For hop3: track (hop1_parent, hop2_node) pairs
-                    for hop1_parent in parent_map[source]:
-                        path_scores.append({'parent': (hop1_parent, source), 'scores': scores})
-                else:
-                    # For hop2: track hop1 parent
-                    path_scores.append({'parent': source, 'scores': scores})
+                if keep_path_scores:
+                    if parent_map and source in parent_map:
+                        # For hop3: track (hop1_parent, hop2_node) pairs
+                        for hop1_parent in parent_map[source]:
+                            path_scores.append({'parent': (hop1_parent, source), 'scores': scores})
+                    else:
+                        # For hop2: track hop1 parent
+                        path_scores.append({'parent': source, 'scores': scores})
                 
-                score_tensors.append(scores.squeeze(0))
+                # Running MAX aggregation (avoid stacking all tensors at end)
+                if max_scores is None:
+                    max_scores = scores_1d
+                else:
+                    max_scores = torch.maximum(max_scores, scores_1d)
         
-        # Aggregate scores with MAX, apply threshold, and optionally filter by GT
+        if max_scores is None:
+            return path_scores, set()
+
+        # Apply threshold to MAX-aggregated scores, and optionally filter by GT
         gt_nodes = None
         max_gt_nodes = {1: 50, 2: 50, 3: None}[hop_num]
         if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, query_idx, hop_num):
             gt_nodes = ground_truth_hops[query_idx][hop_num]
         
-        filtered_nodes = self._aggregate_and_threshold(
-            score_tensors, hop_idx=hop_num-1, lamhat=lamhat, 
-            gt_nodes=gt_nodes, max_gt_nodes=max_gt_nodes
-        )
+        nodes = self._extract_nodes_from_scores(max_scores.unsqueeze(0), threshold)
+        if gt_nodes is not None:
+            nodes = self._apply_gt_filtering(
+                nodes,
+                max_scores,
+                gt_nodes,
+                max_gt_nodes,
+            )
         
-        return path_scores, score_tensors, filtered_nodes
+        return path_scores, set(nodes)
     
     def _build_hop2_to_hop1_map(self, hop2_path_scores: List[Dict], lamhat: List[float]) -> Dict[int, List[int]]:
         """Map hop2 nodes to their hop1 parents for path tracking."""
@@ -276,46 +329,58 @@ class ThreeHopPipeline(BasePipeline):
         
         return hop2_to_hop1
     
-    def _aggregate_and_threshold(self, score_tensors: List[torch.Tensor], hop_idx: int, 
-                                lamhat: List[float], gt_nodes: Optional[List[int]] = None, 
-                                max_gt_nodes: Optional[int] = 100) -> set:
-        """Aggregate scores with MAX, apply threshold, and optionally filter by GT."""
-        if not score_tensors:
-            return set()
-        
-        max_scores = torch.stack(score_tensors, dim=0).max(dim=0).values
-        threshold = self._get_threshold(lamhat, hop_idx)
-        nodes = self._extract_nodes_from_scores(max_scores.unsqueeze(0), threshold)
-        
-        if gt_nodes is not None:
-            nodes = self._apply_gt_filtering(nodes, max_scores.cpu().numpy(), gt_nodes, max_gt_nodes)
-        
-        return set(nodes)
-    
-    def _apply_gt_filtering(self, nodes: List[int], scores_np: np.ndarray, 
+    def _apply_gt_filtering(self, nodes: List[int], scores: torch.Tensor, 
                            gt_nodes: List[int], max_nodes: Optional[int]) -> List[int]:
-        """Apply ground truth filtering with safety limits."""
+        """Apply ground truth filtering with safety limits (pure torch, no CPU transfers)."""
         if not gt_nodes:
             return nodes
-        
-        gt_scores = scores_np[gt_nodes]
-        min_gt_score = float(gt_scores.min()) if len(gt_scores) > 0 else 0.0
-        filtered_nodes = [n for n in nodes if scores_np[n] >= min_gt_score]
-        
-        if max_nodes is not None and len(filtered_nodes) > max_nodes:
-            node_scores = [(n, scores_np[n]) for n in filtered_nodes]
-            node_scores.sort(key=lambda x: x[1], reverse=True)
-            top_nodes = [n for n, s in node_scores[:max_nodes]]
-            
-            # Ensure all GT nodes are included
-            missing_gt = list(set(gt_nodes) - set(top_nodes))
-            filtered_nodes = top_nodes + missing_gt
-            
-            logging.debug(f"GT filtering: top {max_nodes}={len(top_nodes)}, "
-                         f"GT nodes={len(gt_nodes)}, missing GT={len(missing_gt)}, "
-                         f"final={len(filtered_nodes)}")
-        
-        return filtered_nodes
+
+        scores_1d = scores.squeeze(0) if scores.dim() > 1 else scores
+        device = scores_1d.device
+        num_entities = int(scores_1d.numel())
+
+        # Clamp/validate GT indices
+        gt_t = torch.as_tensor(gt_nodes, dtype=torch.long, device=device)
+        gt_t = gt_t[(gt_t >= 0) & (gt_t < num_entities)]
+        if gt_t.numel() == 0:
+            return nodes
+
+        min_gt_score = scores_1d[gt_t].min()
+
+        # Filter candidate nodes by min GT score
+        nodes_t = torch.as_tensor(nodes, dtype=torch.long, device=device)
+        nodes_t = nodes_t[(nodes_t >= 0) & (nodes_t < num_entities)]
+        if nodes_t.numel() == 0:
+            return []
+
+        node_scores = scores_1d[nodes_t]
+        keep_mask = node_scores >= min_gt_score
+        kept_nodes = nodes_t[keep_mask]
+        if kept_nodes.numel() == 0:
+            # Preserve old behavior: can return empty after GT-based filtering
+            return []
+
+        # Optional cap (keep top by score, but always include all GT nodes)
+        if max_nodes is not None and kept_nodes.numel() > max_nodes:
+            kept_scores = scores_1d[kept_nodes]
+            k = int(min(max_nodes, kept_nodes.numel()))
+            _, topk_idx = torch.topk(kept_scores, k, largest=True, sorted=True)
+            top_nodes = kept_nodes[topk_idx]
+
+            top_list = [int(x) for x in top_nodes.detach().cpu().tolist()]
+            top_set = set(top_list)
+            missing_gt = [int(x) for x in gt_t.detach().cpu().tolist() if int(x) not in top_set]
+
+            filtered_nodes = top_list + missing_gt
+
+            logging.debug(
+                f"GT filtering: top {max_nodes}={len(top_list)}, "
+                f"GT nodes={len(gt_t)}, missing GT={len(missing_gt)}, "
+                f"final={len(filtered_nodes)}"
+            )
+            return filtered_nodes
+
+        return [int(x) for x in kept_nodes.detach().cpu().tolist()]
     
     def _has_gt_for_hop(self, ground_truth_hops: Optional[List[Dict]], 
                        query_idx: int, hop_num: int) -> bool:

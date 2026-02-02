@@ -1,14 +1,11 @@
-import numpy as np
 import torch
 import logging
 import hashlib
 import json
 from argparse import Namespace
-from typing import List, Dict, Any, Optional, Tuple
-from .model_config import ModelConfig
+from typing import List, Dict, Any, Optional
 from .data_manager import CalibrationDataManager
 from .calibration_manager import CalibrationManager
-from .vector_optimizer import VectorOptimizer
 from .utils import validate_model_name
 from utils import save_component
 
@@ -177,7 +174,13 @@ class VectorConformalRiskControl:
         cal_scores, true_labels, _ = self.data_manager.get_calibration_data()
         return self.calibration_manager.optimize_thresholds(cal_scores, true_labels, alpha)
 
-    def predict(self, x: List, confidence: float, graph_data: Optional[Any] = None) -> List:
+    def predict(
+        self,
+        x: List,
+        confidence: float,
+        graph_data: Optional[Any] = None,
+        ground_truth_hops: Optional[List] = None,
+    ) -> List:
         """
         Make predictions with conformal risk control.
         
@@ -185,34 +188,13 @@ class VectorConformalRiskControl:
             x: Input data
             confidence: Confidence level
             graph_data: Optional graph data
+            ground_truth_hops: Optional ground truth hops (used for calibration/debug)
             
         Returns:
             List of predictions
         """
         alpha = round(1 - confidence, 4)
-        
-        if self.model_name in {"threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"}:
-            return self._predict_vector(x, alpha, graph_data)
-        else:
-            raise ValueError(f"Model {self.model_name} not supported for vector conformal risk control")
-    
-    def _predict_vector(self, x: List, alpha: float, graph_data: Optional[Any] = None, 
-                       ground_truth_hops: Optional[List] = None) -> List:
-        """
-        Predict for vector-based models (ThreeHopPipeline).
-        
-        Uses the model's predict_with_thresholds method, which is the single source of truth
-        for threshold-based cascade inference.
-        
-        Args:
-            x: Input data
-            alpha: Target false negative rate
-            graph_data: Graph data
-            ground_truth_hops: Optional ground truth hops (for calibration)
-            
-        Returns:
-            List of predictions (hop3 nodes only)
-        """
+
         # Get or optimize thresholds
         thresholds = self._get_or_optimize_thresholds(alpha)
         
@@ -281,37 +263,3 @@ class VectorConformalRiskControl:
         self.metadata["calibrated_alphas"][str(alpha)] = thresholds
         
         return thresholds
-
-    @staticmethod
-    def postprocess(risk_control: 'VectorConformalRiskControl', 
-                   general_args: Namespace, args: Namespace) -> None:
-        """
-        Postprocess and save components.
-        
-        Args:
-            risk_control: Risk control instance
-            general_args: General arguments
-            args: Specific arguments
-        """
-        logging.info("Saving calibration scores")
-        
-        cal_scores, true_labels, cal_queries = risk_control.data_manager.get_calibration_data()
-        
-        save_component(
-            general_args.load_path,
-            f"risk_control_{risk_control.model_name}",
-            "cal_scores",
-            cal_scores,
-        )
-        save_component(
-            general_args.load_path,
-            f"risk_control_{risk_control.model_name}",
-            "cal_queries",
-            cal_queries,
-        )
-        save_component(
-            general_args.load_path,
-            f"risk_control_{risk_control.model_name}",
-            "true_labels",
-            true_labels,
-        )

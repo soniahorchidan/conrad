@@ -16,10 +16,9 @@ from ..multihop.model import MultiHopPredictor
 
 
 class CalibrationDataGenerator:
-    """Handles calibration data generation for ThreeHopPipeline."""
     
-    def __init__(self, model: 'ThreeHopPipeline', device: str, top_k: int = 1000, 
-                 max_gt_size: int = 1000, calib_batch_size: int = 8, num_entities: Optional[int] = None):
+    def __init__(self, model: 'ThreeHopPipeline', device: str, top_k: int = 1000,
+                 calib_batch_size: int = 8, num_entities: Optional[int] = None):
         self.model = model
         self.device = device
         # Use provided num_entities or get from model args, default to 14541 for backward compatibility
@@ -28,12 +27,9 @@ class CalibrationDataGenerator:
         elif hasattr(model, 'args') and hasattr(model.args, 'num_entities'):
             self.num_entities = model.args.num_entities
         else:
-            # Fallback: try to get from graph_data if available
-            # Otherwise use default (will be updated when dataset is known)
-            self.num_entities = 14541  # Default for fb15k-237
-            logging.warning(f"num_entities not provided, using default: {self.num_entities}")
+            logging.error(f"num_entities not provided in CalibrationDataGenerator")
+            raise ValueError(f"num_entities not provided in CalibrationDataGenerator")
         self.top_k = top_k  # Only persist top-K scores per hop to reduce memory
-        self.max_gt_size = max_gt_size  # Skip queries with >max_gt_size GT hop3 entities
         self.calib_batch_size = calib_batch_size  # Batch size for calibration processing (reduced for GPU memory)
     
     def generate_calibration_samples(self, save_path: str, db_controller: Any, 
@@ -54,7 +50,7 @@ class CalibrationDataGenerator:
             Tuple of (scores, answers, queries) where queries is None if return_queries=False
         """
         logging.info("Starting calibration sample generation")
-        logging.info(f"Calibration config - Max GT size: {self.max_gt_size}, Top-K: {self.top_k}, Batch size: {self.calib_batch_size}")
+        logging.info(f"Calibration config - Top-K: {self.top_k}, Batch size: {self.calib_batch_size}")
         
         self._setup_calibration_args()
         calib_iterator = self._get_calibration_iterator(
@@ -128,6 +124,8 @@ class CalibrationDataGenerator:
         # 3p uses 3D optimization (τ1, τ2, τ3)
         zero_thresholds = [0.0, 0.0] if (is_2u or is_2ip) else [0.0, 0.0, 0.0]
 
+        graph_data_on_device = None
+
         for batch_idx, data in enumerate(tqdm(calib_list)):
             # Handle both 3-tuple and 4-tuple formats
             if len(data) == 4:
@@ -135,9 +133,13 @@ class CalibrationDataGenerator:
                 query, ans, graph_data, _ = data
             else:
                 query, ans, graph_data = data
-            
-            graph_data = graph_data.to(self.device)
-            query = query.to(self.device)
+
+            # graph_data is identical for all batches; avoid repeatedly traversing/moving it.
+            # Keep graph_data on GPU for ULTRA inference; keep query on CPU to avoid CUDA syncs
+            # from `.item()` in pipeline control-flow code.
+            if graph_data_on_device is None:
+                graph_data_on_device = graph_data.to(self.device) if hasattr(graph_data, "to") else graph_data
+            graph_data = graph_data_on_device
             
             ans_list = ans if isinstance(ans, list) else [ans]
             kept_indices = []
@@ -156,37 +158,11 @@ class CalibrationDataGenerator:
                 try:
                     if is_2u:
                         # For 2u, GT labels are expected to be a list/set of entities (union output).
-                        gt_size = len(gt_labels) if isinstance(gt_labels, (list, set)) else 0
-                        if gt_size > self.max_gt_size:
-                            logging.debug(
-                                f"Filtering query {idx} - GT size {gt_size} > {self.max_gt_size}"
-                            )
-                            batch_filtered += 1
-                            continue
                         vector_nc_scores = self._extract_2u_scores(pred_out, gt_labels)
                     elif is_2ip:
                         # For 2ip, GT labels can be dict {1: branch1, 2: branch2, 3: final} or list/set
-                        if isinstance(gt_labels, dict):
-                            gt_final = gt_labels.get(3, gt_labels.get('final', []))
-                            gt_size = len(gt_final)
-                        else:
-                            gt_size = len(gt_labels) if isinstance(gt_labels, (list, set)) else 0
-                        if gt_size > self.max_gt_size:
-                            logging.debug(
-                                f"Filtering query {idx} - GT size {gt_size} > {self.max_gt_size}"
-                            )
-                            batch_filtered += 1
-                            continue
                         vector_nc_scores = self._extract_2ip_scores(pred_out, gt_labels)
                     else:
-                        # For 3p: Filter queries with too many GT hop3 entities
-                        if gt_labels and 3 in gt_labels:
-                            gt_hop3_size = len(gt_labels[3])
-                            if gt_hop3_size > self.max_gt_size:
-                                logging.debug(f"Filtering query {idx} - GT hop3 size {gt_hop3_size} > {self.max_gt_size}")
-                                batch_filtered += 1
-                                continue
-
                         vector_nc_scores = self._extract_vector_scores(pred_out, gt_labels)
 
                     all_scores.append(vector_nc_scores)
@@ -211,12 +187,6 @@ class CalibrationDataGenerator:
             
             # Clear GPU memory periodically (every 10 batches) to reduce overhead
             del batch_pred_out
-            if batch_idx % 10 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        
-        # Final cache clear at end
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         
         logging.info(f"Calibration processing complete - Processed: {total_processed}, Filtered: {total_filtered}")
         return all_scores, all_answers, all_queries

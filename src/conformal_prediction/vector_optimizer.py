@@ -1,26 +1,14 @@
 """
 Vector conformal optimization for multi-component models.
 
-This optimizer is designed to be generic and query-type agnostic. It focuses solely
-on the optimization algorithm (building threshold chains, evaluating FNR, finding
-optimal thresholds) while delegating execution semantics to pipeline models.
-
-Architecture:
-- VectorOptimizer: Generic optimization algorithm (black-box approach)
-- Pipeline models (ThreeHopPipeline, TwoUnionPipeline): Query-specific execution logic
-  - ThreeHopPipeline: Implements cascading for 3-hop queries
-  - TwoUnionPipeline: Implements union for 2-union queries
-  
-The optimizer treats pipelines as black boxes and calls their methods to apply thresholds.
-Each pipeline is responsible for its own execution semantics (cascade, union, intersection, etc.).
+The optimizer is query-type agnostic and delegates query execution semantics
+(cascade, union, intersect-project) to pipeline models via
+`pipeline_model.apply_thresholds_to_scores(...)`.
 """
 import numpy as np
-import torch
 import logging
-from typing import List, Dict, Tuple, Optional
-from joblib import Parallel, delayed
+from typing import List, Dict, Optional
 from .utils import compute_fnr_metrics
-import os
 
 # Configuration for different query types
 QUERY_TYPE_CONFIG = {
@@ -54,30 +42,8 @@ class VectorOptimizer:
     """
     Generic vector conformal optimization for multi-component models.
     
-    This optimizer is query-type agnostic and treats pipeline models as black boxes.
-    It focuses solely on the CRC optimization algorithm:
-    - Building candidate threshold chains
-    - Evaluating empirical FNR for each threshold
-    - Finding optimal thresholds that satisfy risk constraints
-    
-    Pipeline Interface (expected methods):
-    -----------------------------------
-    Pipeline models should implement these methods for optimal performance:
-    
-    1. apply_thresholds_to_scores(cal_scores, thresholds, true_labels) -> List[List[int]]
-       - Apply thresholds to calibration data and return predictions
-       - Required for all pipelines
-       
-    2. apply_thresholds_to_scores_cached(dense_cache, cal_scores, thresholds, component_keys) -> List[List[int]]
-       - Optimized version using pre-computed dense vectors
-       - Optional (falls back to non-cached version)
-       - Dramatically speeds up optimization (1000+ threshold evaluations)
-       
-    3. precompute_dense_vectors_for_optimization(cal_scores, component_keys) -> List[Dict]
-       - Pre-compute and cache dense score vectors
-       - Optional (uses generic fallback if not provided)
-       - Each pipeline can optimize caching for its specific execution pattern
-    
+    Supported query types: '3p', '2u', '2ip'.
+
     The optimizer does NOT implement query-specific execution logic (cascade, union, etc.).
     All execution semantics are delegated to the pipeline models.
     """
@@ -93,12 +59,10 @@ class VectorOptimizer:
                 For 2u queries: {'branch1': {...}, 'branch2': {...}}
             true_labels: True labels for each query.
                 For 3p: dict with keys {1, 2, 3} mapping to [entity_ids]
-                For 2u: list of [entity_ids] or dict with final output key
             query_type: Query type identifier (e.g., '3p', '2u', '2ip')
             pipeline_model: Optional pipeline model class (e.g., ThreeHopPipeline, TwoUnionPipeline)
                 Used for apply_thresholds_to_scores() method.
-            num_entities: Number of entities in the dataset. If None, will try to get from pipeline_model
-                or default to 14541 (fb15k-237).
+            num_entities: Number of entities in the dataset.
         """
         self.cal_scores = cal_scores
         self.true_labels = true_labels
@@ -138,10 +102,6 @@ class VectorOptimizer:
         # Import the appropriate pipeline model if not provided
         if self.pipeline_model is None:
             self._load_default_pipeline_model()
-        
-        # Pre-compute dense vectors once to avoid redundant conversions during optimization
-        self._precompute_dense_vectors()
-        logging.info(f"Pre-computed dense score vectors for faster threshold evaluation")
     
     def _load_default_pipeline_model(self):
         """Load the default pipeline model based on query type."""
@@ -159,170 +119,7 @@ class VectorOptimizer:
             logging.info("Using TwoIntersectProjectPipeline for 2ip queries")
         else:
             raise ValueError(f"No default pipeline model for query type '{self.query_type}'")
-    
 
-    def _precompute_dense_vectors(self):
-        """
-        Pre-compute dense score vectors for all components across all queries.
-        This is done ONCE during initialization to avoid redundant conversions
-        during threshold optimization (which evaluates 1000+ threshold candidates).
-        
-        Delegates to pipeline model for query-type-specific caching logic.
-        
-        Stores pre-computed dense vectors in self.dense_cache.
-        """        
-        # Delegate to pipeline model if it provides custom caching
-        if hasattr(self.pipeline_model, 'precompute_dense_vectors_for_optimization'):
-            self.dense_cache = self.pipeline_model.precompute_dense_vectors_for_optimization(
-                self.cal_scores,
-                self.component_keys
-            )
-        else:
-            # Generic fallback based on has_path_dependencies flag
-            if self.has_path_dependencies:
-                self._precompute_dense_vectors_with_dependencies()
-            else:
-                self._precompute_dense_vectors_independent()
-    
-    def _precompute_dense_vectors_independent(self):
-        """
-        Pre-compute dense vectors for independent components (e.g., 2u branches).
-        No path tracking needed since components are evaluated independently then combined.
-        """
-        self.dense_cache = []
-        
-        for query_idx, query_data in enumerate(self.cal_scores):
-            query_cache = {}
-            
-            for comp_key in self.component_keys:
-                comp_data = query_data[comp_key]
-                
-                # For independent components, expect dict with 'scores' key
-                if isinstance(comp_data, dict) and 'scores' in comp_data:
-                    scores = comp_data['scores']
-                    is_gt_only = isinstance(scores, dict) and scores.get('gt_only', False)
-                    dense = self.pipeline_model._scores_to_dense_vector(scores, num_entities=self.num_entities)
-                    
-                    query_cache[f'{comp_key}_dense'] = dense
-                    query_cache[f'{comp_key}_is_gt_only'] = is_gt_only
-                    if 'nodes' in comp_data:
-                        query_cache[f'{comp_key}_calibration_nodes'] = set(comp_data['nodes'])
-                else:
-                    raise ValueError(f"Expected dict with 'scores' for independent component {comp_key}, got {type(comp_data)}")
-            
-            self.dense_cache.append(query_cache)
-    
-    def _precompute_dense_vectors_with_dependencies(self):
-        """
-        Pre-compute dense vectors for sequential components with path dependencies (e.g., 3p hops).
-        Maintains parent-child relationships for threshold-dependent path filtering.
-        """
-        self.dense_cache = []
-        
-        for query_idx, query_data in enumerate(self.cal_scores):
-            query_cache = {}
-            
-            # Process each component
-            for comp_idx, comp_key in enumerate(self.component_keys):
-                comp_data = query_data[comp_key]
-                
-                # Initialize component cache
-                query_cache[f'{comp_key}_calibration_nodes'] = set()
-                query_cache[f'{comp_key}_dense_vectors'] = []
-                query_cache[f'{comp_key}_parents'] = []
-                query_cache[f'{comp_key}_is_gt_only'] = False
-                query_cache[f'{comp_key}_max_scores'] = None
-                
-                # Check for pre-aggregated scores
-                aggregated_key = f'{comp_key}_aggregated'
-                is_already_aggregated = aggregated_key in query_data
-                
-                if is_already_aggregated:
-                    # Use pre-aggregated scores
-                    query_cache[f'{comp_key}_max_scores'] = self.pipeline_model._scores_to_dense_vector(
-                        query_data[aggregated_key], num_entities=self.num_entities
-                    )
-                    query_cache[f'{comp_key}_is_gt_only'] = query_data[aggregated_key].get('gt_only', False)
-                    
-                elif isinstance(comp_data, dict) and 'scores' in comp_data:
-                    # First component or single-path component
-                    scores = comp_data['scores']
-                    if isinstance(scores, dict) and scores.get('gt_only', False):
-                        query_cache[f'{comp_key}_is_gt_only'] = True
-                    dense = self.pipeline_model._scores_to_dense_vector(scores, num_entities=self.num_entities)
-                    query_cache[f'{comp_key}_dense'] = dense
-                    
-                    if 'nodes' in comp_data:
-                        query_cache[f'{comp_key}_calibration_nodes'] = set(comp_data['nodes'])
-                
-                elif isinstance(comp_data, list):
-                    # Multi-path component (e.g., hop2, hop3)
-                    # Need to track which paths are valid based on parent components
-                    for path_data in comp_data:
-                        if not isinstance(path_data, dict) or 'scores' not in path_data:
-                            continue
-                        
-                        scores = path_data['scores']
-                        parent = path_data.get('parent')
-                        
-                        # Check if parent is valid
-                        if comp_idx > 0 and parent is not None:
-                            prev_comp_key = self.component_keys[comp_idx - 1]
-                            prev_calibration_nodes = query_cache.get(f'{prev_comp_key}_calibration_nodes', set())
-                            
-                            # Handle tuple parents (e.g., (hop1_parent, hop2_parent))
-                            if isinstance(parent, tuple):
-                                # Check if first parent is in previous component's calibration nodes
-                                if prev_calibration_nodes and parent[0] not in prev_calibration_nodes:
-                                    continue
-                            elif isinstance(parent, (int, np.integer)):
-                                # Single parent
-                                if prev_calibration_nodes and parent not in prev_calibration_nodes:
-                                    continue
-                        
-                        # Valid path - add to cache
-                        if isinstance(scores, dict) and scores.get('gt_only', False):
-                            query_cache[f'{comp_key}_is_gt_only'] = True
-                        
-                        dense = self.pipeline_model._scores_to_dense_vector(scores, num_entities=self.num_entities)
-                        query_cache[f'{comp_key}_dense_vectors'].append(dense)
-                        query_cache[f'{comp_key}_parents'].append(parent)
-                    
-                    # Pre-compute MAX aggregated scores (threshold-independent)
-                    if query_cache[f'{comp_key}_dense_vectors']:
-                        query_cache[f'{comp_key}_max_scores'] = np.maximum.reduce(
-                            query_cache[f'{comp_key}_dense_vectors']
-                        )
-                
-                # Extract calibration nodes for next component
-                # (nodes that should be tracked through the cascade)
-                if comp_idx < len(self.component_keys) - 1:
-                    next_comp_key = self.component_keys[comp_idx + 1]
-                    next_comp_data = query_data.get(next_comp_key)
-                    
-                    if isinstance(next_comp_data, list):
-                        for path_data in next_comp_data:
-                            if isinstance(path_data, dict) and 'parent' in path_data:
-                                parent = path_data['parent']
-                                # Extract relevant parent for this component
-                                if isinstance(parent, tuple):
-                                    # Multi-level parent - use the one corresponding to this component
-                                    relevant_parent = parent[comp_idx] if comp_idx < len(parent) else parent[0]
-                                else:
-                                    relevant_parent = parent
-                                
-                                # Check if this parent is reachable from previous components
-                                if comp_idx == 0:
-                                    query_cache[f'{comp_key}_calibration_nodes'].add(relevant_parent)
-                                else:
-                                    prev_comp_key = self.component_keys[comp_idx - 1]
-                                    prev_calib_nodes = query_cache.get(f'{prev_comp_key}_calibration_nodes', set())
-                                    if not prev_calib_nodes or relevant_parent in prev_calib_nodes or comp_idx == 0:
-                                        query_cache[f'{comp_key}_calibration_nodes'].add(relevant_parent)
-            
-            self.dense_cache.append(query_cache)
-
-    # TODO(sonia): is this even needed?
     def _extract_gt_scores(self) -> np.ndarray:
         """
         Extracts scores into a matrix for threshold chain building.
@@ -384,16 +181,15 @@ class VectorOptimizer:
                         scores_matrix[query_idx, comp_idx, :min(len(max_aggregated), self.num_entities)] = max_aggregated[:self.num_entities]
                 
                 elif isinstance(comp_data, list) and not self.has_path_dependencies:
-                    # Independent components with multiple items (shouldn't happen for 2u, but handle it)
-                    score_vectors = []
-                    for item in comp_data:
-                        if isinstance(item, dict) and 'scores' in item:
-                            vec = self.pipeline_model._scores_to_dense_vector(item['scores'], num_entities=self.num_entities)
-                            score_vectors.append(vec)
-                    
-                    if score_vectors:
-                        max_aggregated = np.maximum.reduce(score_vectors)
-                        scores_matrix[query_idx, comp_idx, :min(len(max_aggregated), self.num_entities)] = max_aggregated[:self.num_entities]
+                    # Not supported in this project (2u uses dict scores per branch).
+                    raise ValueError(
+                        f"Unexpected list data for independent component '{comp_key}'. "
+                        f"Expected dict with 'scores'."
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported calibration score format for component '{comp_key}': {type(comp_data)}"
+                    )
                 
         return scores_matrix
 
@@ -408,26 +204,57 @@ class VectorOptimizer:
             if not np.any(np.isfinite(calibration_scores[:, j])):
                 raise ValueError(f"No finite scores for hop {j+1}") 
 
-        if self.k == 3:
-            if self.query_type == '2ip':
-                # For 2ip: branch1, branch2 (symmetric), projection (depends on intersection)
-                hop_exponents = [0.85, 0.85, 1.02]
-                logging.info(f"Using 2ip specialized exponents: {hop_exponents}")
-            else:
-                # For 3p: sequential hops
-                hop_exponents = [0.85, 1.30, 1.02]
-                logging.info(f"Using 3-hop specialized exponents: {hop_exponents}")
-        elif self.k == 2:
-            # For 2u: two independent branches
-            hop_exponents = [0.9, 0.9]
-            logging.info(f"Using 2u specialized exponents: {hop_exponents}")
-        else:
-            # Fallback for k=1 or k>3
-            hop_exponents = [1.0] * self.k
-            logging.info(f"Using fallback balanced exponents for k={self.k}")
+        # if self.query_type == '2ip':
+        #     hop_exponents = [0.85, 0.85, 1.02]
+        # elif self.query_type == '3p':
+        #     hop_exponents = [0.85, 1.30, 1.02]
+        # elif self.query_type == '2u':
+        #     hop_exponents = [0.9, 0.9]
+        # else:
+        #     raise ValueError(f"Unsupported query_type='{self.query_type}'. Supported: '2ip', '3p', '2u'.")
+
+        # logging.info(f"Using {self.query_type} specialized exponents: {hop_exponents}")
 
         # Aggregate using MAX per query (shape: (N, k, num_entities) -> (N, k))
         aggregated_scores = np.max(calibration_scores, axis=2)
+
+        # 1. Calculate the 'Quality' of each hop based on GT scores
+        # High mean score = High confidence = We can afford to be stricter (Lower Exponent)
+        hop_means = []
+        for j in range(self.k):
+            # Get valid GT scores for this hop
+            valid_scores = aggregated_scores[:, j]
+            valid_scores = valid_scores[np.isfinite(valid_scores)]
+            
+            if len(valid_scores) > 0:
+                mean_score = np.mean(valid_scores)
+            else:
+                mean_score = 0.5 # Fallback
+            
+            # Clip to avoid division by zero or extreme outliers
+            mean_score = np.clip(mean_score, 0.1, 0.99)
+            hop_means.append(mean_score)
+        
+        hop_means = np.array(hop_means)
+        
+        # 2. Compute Auto-Exponents: Inverse Proportionality
+        # Base idea: Exponent ~ (Global Average / Hop Average)
+        # If Hop 1 has mean 0.9 and Global is 0.6 -> Exp = 0.66 (Strict)
+        # If Hop 2 has mean 0.3 and Global is 0.6 -> Exp = 2.0 (Loose)
+        
+        global_mean = np.mean(hop_means)
+        
+        # Add a 'dampening factor' (power) to control how aggressive the tuning is.
+        # power=1.0 is linear. power=0.0 makes all exponents 1.0 (uniform).
+        # power=0.5 is a safe, conservative setting for VLDB.
+        tuning_aggression = 1.0 
+        
+        hop_exponents = (global_mean / hop_means) ** tuning_aggression
+        
+        # 3. Safety Constraints
+        # Cap exponents to prevent them from going wild (e.g., 0.01 or 10.0)
+        hop_exponents = np.clip(hop_exponents, 0.5, 2.0)
+        logging.info(f"Auto-tuned exponents based on score means {np.round(hop_means, 3)}: {np.round(hop_exponents, 3)}")
         
         # 3. Generate all candidates
         for i in range(num_levels):
@@ -470,7 +297,7 @@ class VectorOptimizer:
         return final_chain
 
 
-    def optimize_thresholds_batch(self, alphas: List[float], delta: float = 0.05) -> Dict[float, np.ndarray]:
+    def optimize_thresholds_batch(self, alphas: List[float]) -> Dict[float, np.ndarray]:
         calibration_scores = self._extract_gt_scores()
         chain = self._build_candidate_thresholds(calibration_scores)
         n = self.n
@@ -481,7 +308,7 @@ class VectorOptimizer:
         def get_adjusted_risk(idx):
             if idx not in memo:
                 # Compute ONLY when requested
-                fnr = self._compute_fnr_for_thresholds_cached(chain[idx])
+                fnr = self._compute_fnr_for_thresholds(chain[idx])
                 memo[idx] = (n / (n + 1)) * fnr + (B / (n + 1))
             return memo[idx]
 
@@ -506,14 +333,14 @@ class VectorOptimizer:
                     high = mid - 1
             
             best_thresholds_dict[alpha] = chain[best_idxForAlpha]
-            logging.info(f"α={alpha} -> Optimal τ: {best_thresholds_dict[alpha]}, Adjusted Risk: {get_adjusted_risk(best_idxForAlpha):.4f}")
+            logging.info(f"alpha={alpha} -> Optimal lamhat: {best_thresholds_dict[alpha]}, Adjusted Risk: {get_adjusted_risk(best_idxForAlpha):.4f}")
             # Optimization: Since alphas are sorted, the next alpha (larger) 
             # will have a best_idx >= current best_idx
             search_low = best_idxForAlpha 
 
         return best_thresholds_dict
     
-    def _compute_fnr_for_thresholds_cached(self, thresholds: np.ndarray) -> float:
+    def _compute_fnr_for_thresholds(self, thresholds: np.ndarray) -> float:
         """
         Compute FNR using pipeline-specific execution logic.
         
@@ -526,22 +353,12 @@ class VectorOptimizer:
         Returns:
             Mean false negative rate across queries
         """
-        # Delegate to pipeline model's cached threshold application
-        if hasattr(self.pipeline_model, 'apply_thresholds_to_scores_cached'):
-            predictions = self.pipeline_model.apply_thresholds_to_scores_cached(
-                self.dense_cache,
-                self.cal_scores,
-                thresholds,
-                self.component_keys
-            )
-        else:
-            # Fallback to non-cached version
-            predictions = self.pipeline_model.apply_thresholds_to_scores(
-                self.cal_scores,
-                thresholds,
-                self.true_labels,
-                num_entities=self.num_entities
-            )
+        predictions = self.pipeline_model.apply_thresholds_to_scores(
+            self.cal_scores,
+            thresholds,
+            self.true_labels,
+            num_entities=self.num_entities
+        )
         
         # Extract ground truth using configured final component index
         ground_truth = self._extract_ground_truth()
@@ -579,39 +396,3 @@ class VectorOptimizer:
             ground_truth.append(gt_entities)
         
         return ground_truth
-            
-    def _compute_fnr_for_thresholds(self, thresholds: np.ndarray) -> float:
-        """   
-        Args:
-            thresholds: Threshold values for each component (τ1, τ2, ..., τk)
-            
-        Returns:
-            Mean false negative rate across queries
-        """
-        # Use the model's apply_thresholds_to_scores for consistency
-        predictions = self.pipeline_model.apply_thresholds_to_scores(
-            self.cal_scores, 
-            thresholds, 
-            self.true_labels,
-            num_entities=self.num_entities
-        )
-        
-        # Extract ground truth (final component's entities)
-        ground_truth = []
-        for label in self.true_labels:
-            if isinstance(label, dict):
-                # Use configured final_component_idx
-                if self.final_component_idx is not None:
-                    gt_entities = label.get(self.final_component_idx, [])
-                else:
-                    # For union/intersection, try common keys
-                    gt_entities = label.get('union', label.get(max(label.keys()) if label.keys() else 0, []))
-            elif isinstance(label, list):
-                gt_entities = label
-            else:
-                gt_entities = []
-            ground_truth.append(gt_entities)
-        
-        # Compute FNR using the unified metric
-        fnr, _, _ = compute_fnr_metrics(predictions, ground_truth)
-        return fnr

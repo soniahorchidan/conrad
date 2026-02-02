@@ -156,10 +156,19 @@ class MultiHopPredictor(nn.Module):
             Probability tensor [B, V] with Neo4j scores filled in
         """
         B, V = ultra_raw.size()
-        prob = torch.zeros((B, V), device=ultra_raw.device)
+        device = ultra_raw.device
+        prob = torch.zeros((B, V), device=device, dtype=ultra_raw.dtype)
+
+        # Neo4j results arrive as Python lists/dicts. Avoid per-element GPU writes from Python,
+        # which are extremely slow. Instead, do one indexed assignment per batch row.
         for b in range(B):
-            for a in neo4j_results[b]:
-                prob[b, a] = neo4j_scores[b][a]
+            ids = neo4j_results[b]
+            if not ids:
+                continue
+            # ids: List[int], neo4j_scores[b]: Dict[int, float]
+            idx = torch.as_tensor(ids, dtype=torch.long, device=device)
+            vals = torch.as_tensor([neo4j_scores[b][int(i)] for i in ids], dtype=ultra_raw.dtype, device=device)
+            prob[b].index_put_((idx,), vals, accumulate=False)
         return prob
 
     # TODO(sonia): delete this function
@@ -241,4 +250,6 @@ class MultiHopPredictor(nn.Module):
         min_neo4j = 0.5
         s_unified = self._unified_scores_from_raw(ultra_raw, prob, min_neo4j)
         
-        return s_unified.cpu().float(), min_neo4j
+        # Keep scores on-device (GPU) to avoid sync/copies in hot loops.
+        # Callers can move to CPU only for the small outputs they need.
+        return s_unified, min_neo4j

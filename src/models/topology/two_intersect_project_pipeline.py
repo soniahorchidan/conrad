@@ -70,14 +70,17 @@ class TwoIntersectProjectPipeline(BasePipeline):
                 ground_truth: Optional[List[List[int]]] = None) -> List[Dict[str, Any]]:
         if query.dim() == 1:
             query = query.unsqueeze(0)
+
+        # Avoid CUDA syncs from `.item()` when query arrives on GPU.
+        query_cpu = query.detach().cpu() if isinstance(query, torch.Tensor) and query.is_cuda else query
         
         batch_size = query.shape[0]
         batch_results = []
         
         for i in range(batch_size):
-            anchor1, rel1 = query[i, 0].item(), query[i, 1].item()
-            anchor2, rel2 = query[i, 2].item(), query[i, 3].item()
-            rel3 = query[i, 4].item()
+            anchor1, rel1 = query_cpu[i, 0].item(), query_cpu[i, 1].item()
+            anchor2, rel2 = query_cpu[i, 2].item(), query_cpu[i, 3].item()
+            rel3 = query_cpu[i, 4].item()
             
             # 2. Independent Branch Thresholding (3D optimization)
             t_branch1 = lamhat[0] if len(lamhat) > 0 else 0.0
@@ -134,7 +137,7 @@ class TwoIntersectProjectPipeline(BasePipeline):
                     p_scores, _ = self.unified_predictor.predict(int_tensor, rel3_tensor, graph_data, threshold=t_proj)
                     
                     for j, parent_id in enumerate(b_nodes):
-                        s_vec = p_scores[j].cpu()
+                        s_vec = p_scores[j].detach().cpu()
                         all_proj_scores.append(s_vec)
                         
                         # Store sparse scores so the optimizer can find GT even if it failed t_proj

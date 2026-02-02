@@ -19,6 +19,64 @@ from typing import List, Dict, Any, Tuple, Optional, Union, Set
 import logging
 
 
+# Dataset statistics: number of entities and relations for each dataset.
+# Relations count includes inverse relations (e.g., fb15k-237 has 237 relations, 474 with inverses)
+DATASET_STATISTICS: Dict[str, Dict[str, int]] = {
+    "fb15k-237": {
+        "num_entities": 14541,
+        "num_relations": 237,  # Original relations (474 with inverse edges)
+    },
+    "nell-955": {
+        "num_entities": 75494,  # From terminal output: "75494 nodes"
+        "num_relations": 955,  # Original relations (already contains inverse edges)
+    },
+    "yago310": {
+        "num_entities": 123182,  # YAGO3-10 dataset
+        "num_relations": 37,  # Original relations (74 with inverse edges if added)
+    },
+}
+
+
+def get_dataset_statistics(dataset: str) -> Dict[str, int]:
+    """
+    Get dataset statistics (num_entities, num_relations) for a given dataset.
+
+    Args:
+        dataset: Dataset name (e.g., "fb15k-237", "nell-955", "yago310")
+
+    Returns:
+        dict with "num_entities" and "num_relations" keys
+
+    Raises:
+        ValueError: If dataset is not supported
+    """
+    if dataset not in DATASET_STATISTICS:
+        raise ValueError(
+            f"Unsupported dataset: {dataset}. "
+            f"Supported datasets: {list(DATASET_STATISTICS.keys())}"
+        )
+    return DATASET_STATISTICS[dataset]
+
+
+def is_vector_model(model_name: str) -> bool:
+    """
+    Check if a model uses vector conformal risk control.
+
+    Args:
+        model_name: Name of the model
+
+    Returns:
+        True if model uses vector conformal risk control
+    """
+    # Normalize to be robust to caller casing / separators.
+    model_key = model_name.lower().replace("_", "").replace("-", "")
+    return model_key in {
+        "threehoppipeline",
+        "twounionpipeline",
+        "twointersectprojectpipeline",
+    }
+
+
 def calculate_false_negative_rate(scores: List[np.ndarray], 
                                 true_labels: List[List[int]], 
                                 threshold: float) -> float:
@@ -184,11 +242,11 @@ def compute_fnr_metrics(preds: List[Union[List[int], Set[int]]],
     f1s = np.zeros(n_total)
 
     for i in range(n_total):
-        # 1. Standardize inputs to sets
+        # Standardize inputs to sets
         gt_labels = set(int(x) for x in ground_truth[i]) if ground_truth[i] else set()
         pred_labels = set(int(x) for x in preds[i]) if preds[i] else set()
 
-        # 2. Handle queries with no ground truth
+        # Handle queries with no ground truth
         if len(gt_labels) == 0:
             # If there is nothing to find, FNR is 0.
             fnrs[i] = 0.0
@@ -196,23 +254,23 @@ def compute_fnr_metrics(preds: List[Union[List[int], Set[int]]],
             f1s[i] = precisions[i] # Simple mapping for the no-GT case
             continue
 
-        # 3. Calculate Recall and FNR
+        # Calculate Recall and FNR
         hits = len(pred_labels & gt_labels)
         recall = hits / len(gt_labels)
         fnrs[i] = 1.0 - recall
 
-        # 4. Calculate Precision
+        # Calculate Precision
         if len(pred_labels) == 0:
             precisions[i] = 0.0 
         else:
             precisions[i] = hits / len(pred_labels)
 
-        # 5. Calculate F1
+        # Calculate F1
         if (precisions[i] + recall) > 0:
             f1s[i] = (2 * precisions[i] * recall) / (precisions[i] + recall)
         else:
             f1s[i] = 0.0
 
-    # Return macro-averages (mean of per-query metrics)
+    # Return macro-averages (mean of per-query metrics) for FNR, Precision, and F1
     # This ensures the denominator is ALWAYS n_total queries
     return np.mean(fnrs), np.mean(precisions), np.mean(f1s)

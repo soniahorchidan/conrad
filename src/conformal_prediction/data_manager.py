@@ -7,7 +7,7 @@ import logging
 import torch
 import pickle
 from typing import List, Dict, Any, Optional, Tuple
-from .model_config import ModelConfig
+from .utils import is_vector_model
 
 
 class CalibrationDataManager:
@@ -29,7 +29,7 @@ class CalibrationDataManager:
         self.metadata = {}
         
         # For vector CRC caching
-        self.is_vector_model = ModelConfig.is_vector_model(model_name)
+        self.is_vector_model = is_vector_model(model_name)
 
     def set_calibration_data(self, cal_scores: List, true_labels: List, cal_queries: List) -> None:
         """

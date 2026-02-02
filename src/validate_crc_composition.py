@@ -17,7 +17,7 @@ from inference import ModelFactory, parse_args_inference
 from utils import merge_args, get_graph
 from graph_handler import Neo4JBackendDBController
 from conformal_prediction.utils import compute_fnr_metrics
-from conformal_prediction.validate_conformal_risk_control import get_dataset_statistics
+from conformal_prediction.utils import get_dataset_statistics
 
 
 @dataclass

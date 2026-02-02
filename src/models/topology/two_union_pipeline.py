@@ -100,15 +100,18 @@ class TwoUnionPipeline(BasePipeline):
         """
         if query.dim() == 1:
             query = query.unsqueeze(0)
+
+        # Avoid CUDA syncs from `.item()` when query arrives on GPU.
+        query_cpu = query.detach().cpu() if isinstance(query, torch.Tensor) and query.is_cuda else query
         
         batch_size = query.shape[0]
         batch_results = []
         
         for i in range(batch_size):
-            anchor1 = query[i, 0].item()
-            rel1 = query[i, 1].item()
-            anchor2 = query[i, 2].item()
-            rel2 = query[i, 3].item()
+            anchor1 = query_cpu[i, 0].item()
+            rel1 = query_cpu[i, 1].item()
+            anchor2 = query_cpu[i, 2].item()
+            rel2 = query_cpu[i, 3].item()
             
             # Apply thresholds to extract nodes
             threshold1 = lamhat[0] if len(lamhat) > 0 else 0.0
