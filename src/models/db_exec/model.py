@@ -33,19 +33,39 @@ class DBExecModel(nn.Module, ModelUtils):
             "RETURN DISTINCT r.id;"
         )
 
-        # TODO(sonia): dont hardcode num edges and nodes
-        self.node_degree_popularity = {
-            str(i): {"popularity": random.uniform(0.5, 1.0)} 
-            for i in range(1, 150000)
-        }
+        # Initialize popularity maps from actual Neo4j data
+        self.node_degree_popularity = {}
+        self.edge_popularity_map = {}
+        
+        try:
+            # Get actual node IDs from Neo4j
+            all_node_ids = self.backend_controller.get_all_node_ids()
+            for node_id in all_node_ids:
+                self.node_degree_popularity[str(node_id)] = {
+                    "popularity": random.uniform(0.51, 1.0)  # Ensure > 0.5
+                }
+            
+            # Get actual edge types from Neo4j
+            all_edge_types = self.backend_controller.get_all_relations()
+            for edge_type in all_edge_types:
+                self.edge_popularity_map[str(edge_type)] = {
+                    "popularity": random.uniform(0.51, 1.0)  # Ensure > 0.5
+                }
+            
+            logging.info(f"Initialized popularity maps: {len(self.node_degree_popularity)} nodes, "
+                        f"{len(self.edge_popularity_map)} edge types")
+        except Exception as e:
+            logging.warning(f"Failed to initialize popularity maps from Neo4j: {e}. Using fallback.")
+            # Fallback: initialize with reasonable defaults
+            # Assuming node IDs are 0-indexed and in range [0, num_entities)
+            # This is a conservative estimate - actual IDs may vary
+            for i in range(150000):
+                self.node_degree_popularity[str(i)] = {"popularity": random.uniform(0.51, 1.0)}
+            for i in range(250):
+                self.edge_popularity_map[str(i)] = {"popularity": random.uniform(0.51, 1.0)}
 
-        self.edge_popularity_map = {
-            str(i): {"popularity": random.uniform(0.5, 1.0)} 
-            for i in range(1, 250)
-        }
-
-        # Tiny epsilon fallback when popularity stats are missing
-        self._pop_epsilon = 1e-2
+        # Minimum fallback when popularity stats are missing - ensure > 0.5
+        self._pop_epsilon = 0.51
 
     def _compute_scores(self, results, rel_type):
         """
@@ -59,9 +79,9 @@ class DBExecModel(nn.Module, ModelUtils):
             Dictionary mapping node_id -> confidence score
         """
         # Get edge popularity with fallback
-        edge_popularity = self.edge_popularity_map.get(str(rel_type), {}).get("popularity")
-        if not edge_popularity:
-            edge_popularity = self._pop_epsilon
+        edge_pop = self.edge_popularity_map.get(str(rel_type), {}).get("popularity")
+        if not edge_pop:
+            edge_pop = self._pop_epsilon
         
         # Compute scores for each result node
         query_scores = {}
@@ -69,7 +89,15 @@ class DBExecModel(nn.Module, ModelUtils):
             node_pop = self.node_degree_popularity.get(str(r), {}).get("popularity")
             if not node_pop:
                 node_pop = self._pop_epsilon
-            confidence = 0.5 * edge_popularity + 0.5 * node_pop
+            
+            # Weighted average: ensures > 0.5 when both are > 0.5
+            # If both are at minimum (0.51), result is 0.51
+            # If one is missing (0.51) and one is found (>0.51), result > 0.51
+            confidence = 0.5 * edge_pop + 0.5 * node_pop
+            
+            # Ensure minimum is strictly > 0.5
+            confidence = max(confidence, 0.51)
+            
             query_scores[r] = confidence
         return query_scores
 
@@ -256,69 +284,75 @@ class DBExecModel(nn.Module, ModelUtils):
             else:
                 scores[idx] = {}
 
-    def generateCalibrateSamples(
-        self, queries, answers, batch_size=32
-    ):
-        self.eval()
-        scores = []
-        hop1_scores = []
-        hop2_scores = []
-        hop3_scores = []
+    # def generateCalibrateSamples(
+    #     self, queries, answers, batch_size=32
+    # ):
+    #     self.eval()
+    #     scores = []
+    #     hop1_scores = []
+    #     hop2_scores = []
+    #     hop3_scores = []
         
-        # Process queries in batches
-        for i in tqdm(range(0, len(queries), batch_size), desc="Processing batches"):
-            batch_queries = queries[i:i + batch_size]
-            batch_answers = answers[i:i + batch_size]
+    #     # Process queries in batches
+    #     for i in tqdm(range(0, len(queries), batch_size), desc="Processing batches"):
+    #         batch_queries = queries[i:i + batch_size]
+    #         batch_answers = answers[i:i + batch_size]
             
-            # Process each query to get intermediate hop results
-            for query in batch_queries:
-                q = query.tolist()
-                num_entities = 14541  # Should match the graph size
+    #         # Process each query to get intermediate hop results
+    #         for query in batch_queries:
+    #             q = query.tolist()
+    #             num_entities = 14541  # Should match the graph size
                 
-                # Initialize score tensors for each hop
-                prob_hop1 = torch.zeros(num_entities)
-                prob_hop2 = torch.zeros(num_entities)
-                prob_hop3 = torch.zeros(num_entities)
+    #             # Initialize score tensors for each hop
+    #             prob_hop1 = torch.zeros(num_entities)
+    #             prob_hop2 = torch.zeros(num_entities)
+    #             prob_hop3 = torch.zeros(num_entities)
                 
-                # Hop 1: Execute first relation
-                if len(q) >= 2:
-                    cypher_hop1 = self.ONE_HOP_TEMPLATE % (q[0], q[1])
-                    res_hop1 = self.backend_controller.execute_query(cypher_hop1)
-                    res_hop1 = [record["r.id"] for record in res_hop1]
-                    if len(res_hop1) > 0:
-                        query_scores_hop1 = self._compute_scores(res_hop1, q[1])
-                        for node_id, score in query_scores_hop1.items():
-                            prob_hop1[node_id] = score
+    #             # Hop 1: Execute first relation
+    #             if len(q) >= 2:
+    #                 cypher_hop1 = self.ONE_HOP_TEMPLATE % (q[0], q[1])
+    #                 res_hop1 = self.backend_controller.execute_query(cypher_hop1)
+    #                 res_hop1 = [record["r.id"] for record in res_hop1]
+    #                 if len(res_hop1) > 0:
+    #                     query_scores_hop1 = self._compute_scores(res_hop1, q[1])
+    #                     for node_id, score in query_scores_hop1.items():
+    #                         # Only set score if node_id is a valid tensor index
+    #                         if isinstance(node_id, (int, float)) and 0 <= int(node_id) < num_entities:
+    #                             prob_hop1[int(node_id)] = score
                 
-                # Hop 2: Execute first two relations
-                if len(q) >= 3:
-                    cypher_hop2 = self.TWO_HOP_TEMPLATE % (q[0], q[1], q[2])
-                    res_hop2 = self.backend_controller.execute_query(cypher_hop2)
-                    res_hop2 = [record["r.id"] for record in res_hop2]
-                    if len(res_hop2) > 0:
-                        query_scores_hop2 = self._compute_scores(res_hop2, q[2])
-                        for node_id, score in query_scores_hop2.items():
-                            prob_hop2[node_id] = score
+    #             # Hop 2: Execute first two relations
+    #             if len(q) >= 3:
+    #                 cypher_hop2 = self.TWO_HOP_TEMPLATE % (q[0], q[1], q[2])
+    #                 res_hop2 = self.backend_controller.execute_query(cypher_hop2)
+    #                 res_hop2 = [record["r.id"] for record in res_hop2]
+    #                 if len(res_hop2) > 0:
+    #                     query_scores_hop2 = self._compute_scores(res_hop2, q[2])
+    #                     for node_id, score in query_scores_hop2.items():
+    #                         # Only set score if node_id is a valid tensor index
+    #                         if isinstance(node_id, (int, float)) and 0 <= int(node_id) < num_entities:
+    #                             prob_hop2[int(node_id)] = score
                 
-                # Hop 3: Execute all three relations (final results)
-                if len(q) >= 4:
-                    cypher_hop3 = self.THREE_HOP_TEMPLATE % (q[0], q[1], q[2], q[3])
-                    res_hop3 = self.backend_controller.execute_query(cypher_hop3)
-                    res_hop3 = [record["r.id"] for record in res_hop3]
-                    if len(res_hop3) > 0:
-                        query_scores_hop3 = self._compute_scores(res_hop3, q[3])
-                        for node_id, score in query_scores_hop3.items():
-                            prob_hop3[node_id] = score
+    #             # Hop 3: Execute all three relations (final results)
+    #             if len(q) >= 4:
+    #                 cypher_hop3 = self.THREE_HOP_TEMPLATE % (q[0], q[1], q[2], q[3])
+    #                 res_hop3 = self.backend_controller.execute_query(cypher_hop3)
+    #                 res_hop3 = [record["r.id"] for record in res_hop3]
+    #                 if len(res_hop3) > 0:
+    #                     query_scores_hop3 = self._compute_scores(res_hop3, q[3])
+    #                     for node_id, score in query_scores_hop3.items():
+    #                         # Only set score if node_id is a valid tensor index
+    #                         if isinstance(node_id, (int, float)) and 0 <= int(node_id) < num_entities:
+    #                             prob_hop3[int(node_id)] = score
                 
-                # Store scores for each hop
-                hop1_scores.append(prob_hop1)
-                hop2_scores.append(prob_hop2)
-                hop3_scores.append(prob_hop3)
-                scores.append(prob_hop3)  # Final scores (hop3) for backward compatibility
+    #             # Store scores for each hop
+    #             hop1_scores.append(prob_hop1)
+    #             hop2_scores.append(prob_hop2)
+    #             hop3_scores.append(prob_hop3)
+    #             scores.append(prob_hop3)  # Final scores (hop3) for backward compatibility
 
-        final_scores = torch.stack(scores)
-        hop1_tensor = torch.stack(hop1_scores)
-        hop2_tensor = torch.stack(hop2_scores)
-        hop3_tensor = torch.stack(hop3_scores)
+    #     final_scores = torch.stack(scores)
+    #     hop1_tensor = torch.stack(hop1_scores)
+    #     hop2_tensor = torch.stack(hop2_scores)
+    #     hop3_tensor = torch.stack(hop3_scores)
         
-        return final_scores, hop1_tensor, hop2_tensor, hop3_tensor 
+    #     return final_scores, hop1_tensor, hop2_tensor, hop3_tensor 

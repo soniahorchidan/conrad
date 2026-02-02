@@ -1,7 +1,0 @@
-The following modules were not unloaded:
-  (Use "module --force purge" to unload all):
-
-  1) hpc/.1.10.1
-/home/x_sonho/conrad/conrad/build.sh: line 24: scripts/constants.env: No such file or directory
-srun: error: n1135: task 0: Exited with exit code 1
-srun: Terminating StepId=50082242.0

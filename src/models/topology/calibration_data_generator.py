@@ -209,10 +209,14 @@ class CalibrationDataGenerator:
                 else:
                     all_queries.append(query.cpu() if isinstance(query, torch.Tensor) and query.is_cuda else query)
             
-            # Clear GPU memory after each batch
+            # Clear GPU memory periodically (every 10 batches) to reduce overhead
             del batch_pred_out
-            if torch.cuda.is_available():
+            if batch_idx % 10 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
+        
+        # Final cache clear at end
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         logging.info(f"Calibration processing complete - Processed: {total_processed}, Filtered: {total_filtered}")
         return all_scores, all_answers, all_queries

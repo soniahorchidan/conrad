@@ -57,7 +57,9 @@ class ThreeHopPipeline(BasePipeline):
         """Extract hop1 nodes that pass threshold and are in calibration data."""
         hop1_scores = query_data['hop1']['scores']
         hop1_passing = ThreeHopPipeline._extract_nodes_by_threshold(hop1_scores, threshold)
-        return hop1_passing & set(query_data['hop1']['nodes'])
+        # TODO(sonia): maybe an issue for calibration? We could do return hop1_passing
+        # return hop1_passing & set(query_data['hop1']['nodes'])
+        return hop1_passing
     
     @staticmethod
     def _process_hop2_for_calibration(query_data: Dict, threshold: float, 
@@ -82,7 +84,9 @@ class ThreeHopPipeline(BasePipeline):
             if hop3_path['parent'][0] in hop1_valid
         }
         
-        return hop2_passing & hop2_calibration
+        # TODO(sonia): maybe an issue for calibration? We could do return hop2_passing
+        # return hop2_passing & hop2_calibration
+        return hop2_passing
     
     @staticmethod
     def _process_hop3_for_calibration(query_data: Dict, threshold: float,
@@ -125,28 +129,41 @@ class ThreeHopPipeline(BasePipeline):
     
     def _process_hop1(self, query: torch.Tensor, lamhat: List[float], graph_data: Any, 
                      ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool) -> Dict[str, Any]:
-        """Process hop 1 for all queries in batch (special case: single source per query)."""
+        """Process hop 1 for all queries in batch, batching queries with same relation type for efficiency."""
         batch_size = query.shape[0]
-        all_nodes, all_scores = [], []
+        all_nodes, all_scores = [None] * batch_size, [None] * batch_size
         
         threshold = self._get_threshold(lamhat, 0)
         
+        # Group queries by relation type for batching
+        relation_groups = {}
         for i in range(batch_size):
-            source = query[i, 0].item()
             relation = query[i, 1].item()
+            if relation not in relation_groups:
+                relation_groups[relation] = []
+            relation_groups[relation].append(i)
+        
+        # Process each relation group in batches
+        for relation, indices in relation_groups.items():
+            # Batch all queries with this relation type
+            sources = [query[i, 0].item() for i in indices]
+            source_tensor = torch.tensor([[s] for s in sources], dtype=torch.long, device=self.device)
+            rel_tensor = torch.tensor([[relation]] * len(sources), dtype=torch.long, device=self.device)
             
-            source_tensor = torch.tensor([[source]], dtype=torch.long, device=self.device)
-            rel_tensor = torch.tensor([[relation]], dtype=torch.long, device=self.device)
-            scores, _ = self.unified_predictor.predict(source_tensor, rel_tensor, graph_data, threshold=threshold)
+            # Predict for all queries in this batch at once
+            batch_scores, _ = self.unified_predictor.predict(source_tensor, rel_tensor, graph_data, threshold=threshold)
             
-            nodes = self._extract_nodes_from_scores(scores, threshold)
-            
-            if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, i, 1):
-                scores_np = scores.squeeze(0).cpu().numpy()
-                nodes = self._apply_gt_filtering(nodes, scores_np, ground_truth_hops[i][1], max_nodes=50)
-            
-            all_nodes.append(nodes)
-            all_scores.append(scores)
+            # Extract results for each query
+            for batch_idx, orig_idx in enumerate(indices):
+                scores = batch_scores[batch_idx:batch_idx+1]
+                nodes = self._extract_nodes_from_scores(scores, threshold)
+                
+                if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, orig_idx, 1):
+                    scores_np = scores.squeeze(0).cpu().numpy()
+                    nodes = self._apply_gt_filtering(nodes, scores_np, ground_truth_hops[orig_idx][1], max_nodes=50)
+                
+                all_nodes[orig_idx] = nodes
+                all_scores[orig_idx] = scores
         
         return {"nodes": all_nodes, "scores": all_scores}
     

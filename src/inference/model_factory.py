@@ -40,6 +40,18 @@ class ModelFactory:
         # Load model weights if the model supports it
         if hasattr(self.model, 'load_weights'):
             self.model.load_weights(self.inf_args.load_path)
+        
+        # Set model to eval mode for inference (critical for UltraQuery checkpoints)
+        # This ensures dropout and batch norm layers behave correctly during inference
+        if hasattr(self.model, 'eval'):
+            self.model.eval()
+            logging.info("Model set to eval mode for inference")
+        
+        # For pipeline models, also set the underlying ULTRA model to eval mode
+        if hasattr(self.model, 'unified_predictor') and hasattr(self.model.unified_predictor, 'ultra'):
+            if hasattr(self.model.unified_predictor.ultra, 'eval'):
+                self.model.unified_predictor.ultra.eval()
+                logging.info("Underlying ULTRA model set to eval mode")
 
     def load_model(self):
         if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:

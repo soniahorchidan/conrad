@@ -184,9 +184,24 @@ class ULTRA(nn.Module, ModelUtils):
             # Handle different checkpoint formats
             if isinstance(checkpoint, dict):
                 # Check if it's a checkpoint dict with nested state_dict
+                # UltraQuery checkpoints may have nested 'model' keys like model.model.model
                 if 'model' in checkpoint:
                     state_dict = checkpoint['model']
                     logging.info("Found checkpoint with 'model' key, extracting state dict")
+                    # Handle nested model keys (e.g., UltraQuery: model.model.model)
+                    # Check if the extracted value is still a dict with 'model' key
+                    if isinstance(state_dict, dict) and 'model' in state_dict:
+                        # Try to find the actual state dict - could be model.model or model.model.model
+                        nested = state_dict
+                        depth = 0
+                        while isinstance(nested, dict) and 'model' in nested and depth < 5:
+                            nested = nested['model']
+                            depth += 1
+                        # If we found a dict with model.* keys, use it
+                        if isinstance(nested, dict) and any('model' in str(k) for k in nested.keys()):
+                            state_dict = nested
+                            logging.info(f"Found nested model structure (depth {depth}), using nested state dict")
+                        # Otherwise, use the original state_dict
                 elif 'state_dict' in checkpoint:
                     state_dict = checkpoint['state_dict']
                     logging.info("Found checkpoint with 'state_dict' key, extracting state dict")
@@ -217,7 +232,19 @@ class ULTRA(nn.Module, ModelUtils):
                 if unexpected_keys:
                     logging.warning(f"Unexpected keys in checkpoint: {unexpected_keys[:5]}..." 
                                   if len(unexpected_keys) > 5 else f"Unexpected keys: {unexpected_keys}")
-                logging.info("Successfully loaded ULTRA model weights")
+                
+                # Verify that at least some weights were loaded
+                loaded_keys = set(self.state_dict().keys()) & set(state_dict.keys())
+                if not loaded_keys:
+                    logging.error("WARNING: No matching keys found between checkpoint and model!")
+                    logging.error(f"Model keys (first 10): {list(self.state_dict().keys())[:10]}")
+                    logging.error(f"Checkpoint keys (first 10): {list(state_dict.keys())[:10]}")
+                else:
+                    logging.info(f"Successfully loaded {len(loaded_keys)}/{len(self.state_dict())} model weights")
+                
+                # Set model to eval mode after loading weights (critical for inference)
+                self.eval()
+                logging.info("Model set to eval mode after loading weights")
             except RuntimeError as e:
                 # If strict loading fails, try to match keys more flexibly
                 logging.warning(f"Strict loading failed: {str(e)}")
@@ -228,23 +255,45 @@ class ULTRA(nn.Module, ModelUtils):
                 checkpoint_keys = set(state_dict.keys())
                 
                 # Try to find matching keys (handle common prefix differences)
+                # UltraQuery checkpoints may have keys like 'model.model.relation_model...'
                 matched_state_dict = {}
                 for ckpt_key in checkpoint_keys:
                     # Try exact match first
                     if ckpt_key in model_keys:
                         matched_state_dict[ckpt_key] = state_dict[ckpt_key]
                     else:
-                        # Try removing common prefixes
-                        for prefix in ['model.', 'ultra.', '']:
-                            stripped_key = ckpt_key.replace(prefix, '', 1) if prefix else ckpt_key
+                        # Try removing common prefixes (including nested model. prefixes)
+                        # Handle patterns like: model.model.relation_model... -> model.relation_model...
+                        stripped_key = ckpt_key
+                        # Remove multiple 'model.' prefixes (for UltraQuery nested structure)
+                        while stripped_key.startswith('model.'):
+                            stripped_key = stripped_key[6:]  # Remove 'model.' prefix
                             if stripped_key in model_keys:
                                 matched_state_dict[stripped_key] = state_dict[ckpt_key]
                                 logging.debug(f"Mapped checkpoint key '{ckpt_key}' -> '{stripped_key}'")
                                 break
+                        
+                        # If that didn't work, try other prefixes
+                        if stripped_key not in model_keys:
+                            for prefix in ['ultra.', '']:
+                                test_key = stripped_key.replace(prefix, '', 1) if prefix else stripped_key
+                                if test_key in model_keys:
+                                    matched_state_dict[test_key] = state_dict[ckpt_key]
+                                    logging.debug(f"Mapped checkpoint key '{ckpt_key}' -> '{test_key}'")
+                                    break
                 
                 if matched_state_dict:
                     self.load_state_dict(matched_state_dict, strict=False)
                     logging.info(f"Successfully loaded {len(matched_state_dict)}/{len(checkpoint_keys)} weights with flexible matching")
+                    
+                    # Verify that weights were actually loaded
+                    loaded_keys = set(self.state_dict().keys()) & set(matched_state_dict.keys())
+                    if loaded_keys:
+                        logging.info(f"Verified: {len(loaded_keys)} weights successfully loaded")
+                    
+                    # Set model to eval mode after loading weights (critical for inference)
+                    self.eval()
+                    logging.info("Model set to eval mode after loading weights (flexible matching)")
                 else:
                     raise RuntimeError(
                         f"Could not match any checkpoint keys to model keys.\n"
@@ -269,6 +318,24 @@ class ULTRA(nn.Module, ModelUtils):
             ) from e
 
     def forward(self, graph_data, query, return_intermediate=False):
+        """
+        Forward pass for query answering.
+        
+        Args:
+            graph_data: Graph data structure
+            query: Query tensor of shape (batch_size, num_hops + 1) where first element is head entity
+            return_intermediate: Whether to return intermediate hop scores
+            
+        Returns:
+            Probability distribution over entities (logits, not sigmoided)
+            If return_intermediate=True, also returns list of intermediate hop scores
+        """
+        # Ensure model is in eval mode during inference
+        # This is critical for UltraQuery checkpoints to produce correct outputs
+        was_training = self.training
+        if was_training:
+            self.eval()
+        
         h_prob = F.one_hot(query[:, 0], graph_data.num_nodes).float()
         num_hops = query.shape[1] - 1
         
@@ -280,77 +347,87 @@ class ULTRA(nn.Module, ModelUtils):
             if return_intermediate:
                 intermediate_scores.append(h_prob.clone())
         
-        # h_prob = F.sigmoid(h_prob)
+        # Note: We return logits, not probabilities (sigmoid is not applied here)
+        # The calling code should apply sigmoid if probabilities are needed
+        # h_prob = F.sigmoid(h_prob)  # Commented out to return logits
+        
         if return_intermediate:
-            return h_prob, intermediate_scores
-        return h_prob
-
-    def generateCalibrateSamples(
-        self, save_path, db_controller, calib_iterator=None, return_queries=False, return_intermediate_scores=False
-    ):
-
-        if return_intermediate_scores:
-            logging.info("Returning intermediate scores for ULTRA...")
+            result = (h_prob, intermediate_scores)
         else:
-            logging.info("Not returning intermediate scores for ULTRA...")
+            result = h_prob
+        
+        # Restore training mode if it was set
+        if was_training:
+            self.train()
+        
+        return result
 
-        self.calib_iterator = DataIterator(
-            self.args,
-            save_path,
-            db_controller,
-            self.device,
-            "calib",
-            self.non_overlap_set,
-        )
+    # def generateCalibrateSamples(
+    #     self, save_path, db_controller, calib_iterator=None, return_queries=False, return_intermediate_scores=False
+    # ):
 
-        self.eval()
-        scores, queries, answers = [], [], []
-        intermediate_scores_list = [] if return_intermediate_scores else None
+    #     if return_intermediate_scores:
+    #         logging.info("Returning intermediate scores for ULTRA...")
+    #     else:
+    #         logging.info("Not returning intermediate scores for ULTRA...")
 
-        with torch.no_grad():
-            logging.info(
-                "Calibration/Validation data does not exist. Start to prepare it"
-            )
-            calib_list = list(self.calib_iterator)
+    #     self.calib_iterator = DataIterator(
+    #         self.args,
+    #         save_path,
+    #         db_controller,
+    #         self.device,
+    #         "calib",
+    #         self.non_overlap_set,
+    #     )
 
-            for data in tqdm(calib_list):
-                query, ans, graph_data = data
-                query = query.to(self.device)
-                graph_data = graph_data.to(self.device)
+    #     self.eval()
+    #     scores, queries, answers = [], [], []
+    #     intermediate_scores_list = [] if return_intermediate_scores else None
 
-                if return_intermediate_scores:
-                    prob, intermediate_scores = self.forward(graph_data, query, return_intermediate=True)
-                    intermediate_scores_list.append(intermediate_scores)
-                else:
-                    prob = self.forward(graph_data, query)
+    #     with torch.no_grad():
+    #         logging.info(
+    #             "Calibration/Validation data does not exist. Start to prepare it"
+    #         )
+    #         calib_list = list(self.calib_iterator)
 
-                scores.append(prob)
-                if return_queries:
-                    queries.append(query)  # Each of shape [batch_sz, query_length], but query_length varies
-                answers.extend(ans)
+    #         for data in tqdm(calib_list):
+    #             query, ans, graph_data = data
+    #             query = query.to(self.device)
+    #             graph_data = graph_data.to(self.device)
 
-            scores = torch.cat(scores, dim=0).cpu().float()
+    #             if return_intermediate_scores:
+    #                 prob, intermediate_scores = self.forward(graph_data, query, return_intermediate=True)
+    #                 intermediate_scores_list.append(intermediate_scores)
+    #             else:
+    #                 prob = self.forward(graph_data, query)
 
-            if return_intermediate_scores:
-                # intermediate_scores_list is a list of lists: [batch][hop]
-                # Need to reorganize: [hop][batch] then concatenate
-                num_hops = len(intermediate_scores_list[0]) if intermediate_scores_list else 0
-                intermediate_by_hop = []
-                for hop_idx in range(num_hops):
-                    hop_scores = [batch_scores[hop_idx] for batch_scores in intermediate_scores_list]
-                    intermediate_by_hop.append(torch.cat(hop_scores, dim=0).cpu().float())
-                intermediate_scores_list = intermediate_by_hop
+    #             scores.append(prob)
+    #             if return_queries:
+    #                 queries.append(query)  # Each of shape [batch_sz, query_length], but query_length varies
+    #             answers.extend(ans)
 
-            if return_queries:
-                # Pad query tensors along the query length dimension (D) so they can be stacked
-                max_D = max(q.shape[1] for q in queries)
-                queries_padded = [F.pad(q, (0, max_D - q.shape[1]), value=-1) for q in queries]
-                queries = torch.cat(queries_padded, dim=0).cpu()  # shape: [num_batches * batch_sz, max_query_length]
+    #         scores = torch.cat(scores, dim=0).cpu().float()
 
-        if return_intermediate_scores:
-            if return_queries:
-                return scores, answers, queries, intermediate_scores_list
-            return scores, answers, intermediate_scores_list
-        elif return_queries:
-            return scores, answers, queries
-        return scores, answers
+    #         if return_intermediate_scores:
+    #             # intermediate_scores_list is a list of lists: [batch][hop]
+    #             # Need to reorganize: [hop][batch] then concatenate
+    #             num_hops = len(intermediate_scores_list[0]) if intermediate_scores_list else 0
+    #             intermediate_by_hop = []
+    #             for hop_idx in range(num_hops):
+    #                 hop_scores = [batch_scores[hop_idx] for batch_scores in intermediate_scores_list]
+    #                 intermediate_by_hop.append(torch.cat(hop_scores, dim=0).cpu().float())
+    #             intermediate_scores_list = intermediate_by_hop
+
+    #         if return_queries:
+    #             # Pad query tensors along the query length dimension (D) so they can be stacked
+    #             max_D = max(q.shape[1] for q in queries)
+    #             queries_padded = [F.pad(q, (0, max_D - q.shape[1]), value=-1) for q in queries]
+    #             queries = torch.cat(queries_padded, dim=0).cpu()  # shape: [num_batches * batch_sz, max_query_length]
+
+    #     if return_intermediate_scores:
+    #         if return_queries:
+    #             return scores, answers, queries, intermediate_scores_list
+    #         return scores, answers, intermediate_scores_list
+    #     elif return_queries:
+    #         return scores, answers, queries
+    #     return scores, answers

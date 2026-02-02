@@ -56,8 +56,8 @@ class FileBasedDataIterator:
         with open(queries_path, "rb") as f:
             queries = pickle.load(f)
             return queries
-            # # # TODO: Remove this query cap - this was only for testing
-            # CAP = 1000
+            # # TODO: Remove this query cap - this was only for testing
+            # CAP = 100
             # if len(queries) > CAP:
             #     logging.warning(f"QUERY CAP ACTIVE: Limiting queries from {len(queries)} to {CAP} for testing purposes. Remove cap before production use!")
             # return queries[:CAP]

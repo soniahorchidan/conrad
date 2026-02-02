@@ -333,7 +333,6 @@ class CRCBenchmarkValidator:
         self.all_results[query_type] = {}
         
         for query_file in self.target_queries:
-            print(f"Processing query file: {query_file}")
             self.all_results[query_type][query_file] = []
             
             # Load queries from file
@@ -462,7 +461,6 @@ class CRCBenchmarkValidator:
         self._log_gpu_info(batch_size)
         
         for query_file in self.target_queries:
-            print(f"Processing query file: {query_file}")
             self.all_results[query_type][query_file] = []
             
             query_subset = self._load_queries_from_file(query_file)

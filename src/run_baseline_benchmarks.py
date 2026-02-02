@@ -59,7 +59,7 @@ class BaselineRunner:
     """
     
     def __init__(self, config_path: str, query_dir: str, max_queries: int = 1000, 
-                 ultra_batch_size: int = 16):
+                 ultra_batch_size: int = 16, use_ultraquery: bool = False):
         """
         Initialize baseline runner.
         
@@ -68,11 +68,13 @@ class BaselineRunner:
             query_dir: Directory containing benchmark queries (should end with _pipeline)
             max_queries: Maximum number of queries to process
             ultra_batch_size: Batch size for Ultra intermediate hops (to avoid GPU OOM)
+            use_ultraquery: If True, use UltraQuery checkpoint instead of dataset-specific models
         """
         self.config_path = config_path
         self.query_dir = query_dir
         self.max_queries = max_queries
         self.ultra_batch_size = ultra_batch_size
+        self.use_ultraquery = use_ultraquery
         
         # Detect template from directory name (more reliable than query string)
         if query_dir.endswith("3p_pipeline"):
@@ -94,6 +96,7 @@ class BaselineRunner:
         
         # Store threshold for reporting
         self.threshold = None
+        self.hybrid_threshold = None  # Store actual hybrid threshold value
         
         # Cache for Ultra scores (to avoid recomputing inference for multiple thresholds)
         self.ultra_scores_cache = None
@@ -253,6 +256,7 @@ class BaselineRunner:
         """Process a batch of nodes through a hop and return all scores (no threshold).
         Returns dict mapping node -> scores tensor (on CPU to save GPU memory)."""
         node_scores = {}
+        batch_count = 0
         for batch_start in range(0, len(nodes), batch_size):
             batch_end = min(batch_start + batch_size, len(nodes))
             batch_nodes = nodes[batch_start:batch_end]
@@ -266,11 +270,16 @@ class BaselineRunner:
                 # CRITICAL FIX: Move to CPU immediately to free GPU memory
                 node_scores[node] = scores[j].cpu().clone()
             
-            # Explicitly delete GPU tensors before clearing cache
+            # Explicitly delete GPU tensors
             del scores, queries
-            # Clear GPU cache after each batch to prevent memory accumulation
-            if torch.cuda.is_available():
+            # Only clear cache periodically to avoid overhead (every 10 batches)
+            batch_count += 1
+            if batch_count % 10 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
+        
+        # Final cache clear at end
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return node_scores
     
@@ -544,9 +553,6 @@ class BaselineRunner:
                     del hop1_scores_gpu
                 if 'hop1_query' in locals():
                     del hop1_query
-                # Clear GPU cache to free memory
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
                 scores_data.append({
                     'hop1_scores': None,
                     'hop2_scores': {},
@@ -558,14 +564,18 @@ class BaselineRunner:
                     'template': '3p'
                 })
             finally:
-                # Explicitly delete tensors before clearing cache
+                # Explicitly delete tensors
                 if 'hop1_scores_gpu' in locals():
                     del hop1_scores_gpu
                 if 'hop1_query' in locals():
                     del hop1_query
-                # Clear GPU cache after each query to prevent memory accumulation
-                if torch.cuda.is_available():
+                # Clear GPU cache periodically (every 10 queries) to prevent memory accumulation
+                if i % 10 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+        
+        # Final cache clear at end
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return scores_data
     
@@ -629,9 +639,6 @@ class BaselineRunner:
                     del branch1_query
                 if 'branch2_query' in locals():
                     del branch2_query
-                # Clear GPU cache to free memory
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
                 scores_data.append({
                     'branch1_scores': None,
                     'branch2_scores': None,
@@ -644,9 +651,13 @@ class BaselineRunner:
                     'template': '2u'
                 })
             finally:
-                # Clear GPU cache after each query to prevent memory accumulation
-                if torch.cuda.is_available():
+                # Clear GPU cache periodically (every 10 queries) to prevent memory accumulation
+                if i % 10 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+        
+        # Final cache clear at end
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return scores_data
     
@@ -726,9 +737,6 @@ class BaselineRunner:
                     del branch1_query
                 if 'branch2_query' in locals():
                     del branch2_query
-                # Clear GPU cache to free memory
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
                 scores_data.append({
                     'branch1_scores': None,
                     'branch2_scores': None,
@@ -743,7 +751,7 @@ class BaselineRunner:
                     'template': '2ip'
                 })
             finally:
-                # Explicitly delete tensors before clearing cache
+                # Explicitly delete tensors
                 if 'branch1_scores_gpu' in locals():
                     del branch1_scores_gpu
                 if 'branch2_scores_gpu' in locals():
@@ -752,9 +760,13 @@ class BaselineRunner:
                     del branch1_query
                 if 'branch2_query' in locals():
                     del branch2_query
-                # Clear GPU cache after each query to prevent memory accumulation
-                if torch.cuda.is_available():
+                # Clear GPU cache periodically (every 10 queries) to prevent memory accumulation
+                if i % 10 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+        
+        # Final cache clear at end
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return scores_data
     
@@ -1451,6 +1463,11 @@ class BaselineRunner:
                 raise ValueError("--load-path is required for Ultra baseline. Please specify the path to pretrained model directory.")
             self.logger.info(f"Using load_path: {inf_args.load_path}")
             
+            # Set msp_threshold=0.0 for UltraQuery (requirement from UltraQuery paper)
+            if self.use_ultraquery:
+                inf_args.msp_threshold = 0.0
+                self.logger.info("Setting msp_threshold=0.0 for UltraQuery checkpoint")
+            
             # Load Ultra model
             self.logger.info("Loading Ultra model...")
             inf_args_ultra = argparse.Namespace(**vars(inf_args))
@@ -1485,6 +1502,10 @@ class BaselineRunner:
                     inf_args.load_path = self._resolve_load_path(load_path)
                     if not inf_args.load_path:
                         raise ValueError("--load-path is required for hybrid baseline.")
+                    # Set msp_threshold=0.0 for UltraQuery (requirement from UltraQuery paper)
+                    if self.use_ultraquery:
+                        inf_args.msp_threshold = 0.0
+                        self.logger.info("Setting msp_threshold=0.0 for UltraQuery checkpoint")
                     inf_args_ultra = argparse.Namespace(**vars(inf_args))
                     inf_args_ultra.model_to_infer = "ULTRA"
                     model_factory_ultra = ModelFactory(inf_args_ultra)
@@ -1584,6 +1605,9 @@ class BaselineRunner:
                 elif template == "3p":
                     hybrid_thresholds = [static_threshold, static_threshold, static_threshold]
             
+            # Store the first threshold for reporting (all thresholds are typically the same)
+            self.hybrid_threshold = hybrid_thresholds[0] if hybrid_thresholds else None
+            
             hybrid_results = self.run_hybrid_baseline(
                 hybrid_model, queries, ground_truths, graph_data, hybrid_thresholds
             )
@@ -1594,6 +1618,17 @@ class BaselineRunner:
         """Resolve load_path from provided value or auto-detect."""
         if load_path:
             return load_path
+        
+        # If use_ultraquery flag is set, use UltraQuery checkpoint
+        if self.use_ultraquery:
+            repo_root = _get_repo_root()
+            ultraquery_dir = os.path.join(repo_root, "artifacts", "snapshots", "ultraquery")
+            if os.path.exists(ultraquery_dir):
+                self.logger.info(f"Using UltraQuery checkpoint directory: {ultraquery_dir}")
+                return ultraquery_dir
+            else:
+                self.logger.error(f"UltraQuery directory not found at: {ultraquery_dir}")
+                raise ValueError(f"UltraQuery directory not found at: {ultraquery_dir}. Please ensure artifacts/snapshots/ultraquery/ exists.")
         
         # Auto-detect from snapshots
         for search_path in ["./artifacts/snapshots", "../artifacts/snapshots"]:
@@ -1655,8 +1690,14 @@ class BaselineRunner:
         
         # Save baseline results summary
         baseline_summary_path = os.path.join(output_dir, "baseline_results_summary.csv")
-        with open(baseline_summary_path, 'w') as f:
-            f.write("baseline,threshold,precision,recall,f1,avg_time_ms,num_queries,num_abstentions,abstention_rate,precision_excl_abstentions,recall_excl_abstentions,f1_excl_abstentions\n")
+        file_exists = os.path.exists(baseline_summary_path)
+        
+        # Use append mode if file exists, write mode if it doesn't
+        mode = 'a' if file_exists else 'w'
+        with open(baseline_summary_path, mode) as f:
+            # Write header only if file doesn't exist
+            if not file_exists:
+                f.write("baseline,threshold,precision,recall,f1,avg_time_ms,num_queries,num_abstentions,abstention_rate,precision_excl_abstentions,recall_excl_abstentions,f1_excl_abstentions\n")
             
             # Save neo4j results if they exist (regardless of skip_neo4j flag)
             if self._has_neo4j_results():
@@ -1672,8 +1713,13 @@ class BaselineRunner:
             # Save Hybrid results only if they exist
             if self._has_hybrid_results():
                 hybrid_stats = self.compute_summary_stats(self.results['hybrid_static'])
-                # Use stored threshold or default
-                threshold_str = f"{self.threshold:.2f}" if self.threshold else "0.75"
+                # Use stored hybrid threshold or fallback to static_threshold
+                if self.hybrid_threshold is not None:
+                    threshold_str = f"{self.hybrid_threshold:.2f}"
+                elif self.threshold is not None:
+                    threshold_str = f"{self.threshold:.2f}"
+                else:
+                    threshold_str = "0.75"
                 self._write_csv_line(f, "hybrid", threshold_str, hybrid_stats)
         
         self.logger.info(f"Baseline summary saved to: {baseline_summary_path}")
@@ -1750,6 +1796,9 @@ class BaselineRunner:
         """
         # Store threshold for reporting
         self.threshold = static_threshold
+        # Store hybrid threshold if provided
+        if hybrid_thresholds is not None and len(hybrid_thresholds) > 0:
+            self.hybrid_threshold = hybrid_thresholds[0]
         
         self.logger.info("="*80)
         self.logger.info("BASELINE BENCHMARK RUNNER")
@@ -1889,6 +1938,9 @@ def _print_configuration(dataset: str = None, baseline_type: str = None,
 
 def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool, skip_ultra: bool):
     """Run benchmarks with multiple thresholds (compute scores once, apply all thresholds)."""
+    # Use first threshold as min_threshold if not explicitly provided (and not 0.0)
+    min_threshold = args.min_threshold if args.min_threshold != 0.0 else args.ultra_thresholds[0]
+    
     # Compute scores once
     result = runner.run(
         output_dir=args.output_dir,
@@ -1903,7 +1955,7 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
         skip_ultra=skip_ultra,
         skip_hybrid=True,  # Skip hybrid for multiple threshold sweeps (Ultra only)
         compute_scores_only=True,
-        min_threshold=args.min_threshold
+        min_threshold=min_threshold
     )
     scores_cache = result.get('scores_cache')
     
@@ -1924,7 +1976,7 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
             skip_ultra=skip_ultra,
             skip_hybrid=True,  # Skip hybrid for threshold subdirectories
             scores_cache=scores_cache,
-            min_threshold=args.min_threshold
+            min_threshold=min_threshold
         )
 
 
@@ -1953,6 +2005,8 @@ def main():
                        help="Batch size for Ultra intermediate hops (to avoid GPU OOM, default: 16)")
     parser.add_argument("--load-path", type=str, default=None,
                        help="Path to pretrained model directory (required for Ultra baseline)")
+    parser.add_argument("--use-ultraquery", action="store_true", default=False,
+                       help="Use the official UltraQuery checkpoint (ultraquery.pth) instead of dataset-specific models")
     parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use (cuda, cpu, mps)")
     parser.add_argument("--neo4j-host", type=str, default="localhost",
@@ -2008,7 +2062,8 @@ def main():
         config_path=None,  # No longer needed
         query_dir=args.query_dir,
         max_queries=args.max_queries,
-        ultra_batch_size=args.ultra_batch_size
+        ultra_batch_size=args.ultra_batch_size,
+        use_ultraquery=args.use_ultraquery
     )
     
     # Run benchmarks

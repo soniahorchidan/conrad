@@ -134,7 +134,7 @@ class CalibrationManager:
             Dictionary mapping alpha values to thresholds
         """
         if alphas is None:
-            alphas = np.arange(0.1, 0.61, 0.1)
+            alphas = np.arange(0.1, 0.51, 0.1)
         
         # For vector models, use batch optimization (much faster!)
         if self.is_vector_model:
