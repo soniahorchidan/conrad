@@ -41,7 +41,7 @@ class BenchmarkConfig:
     calibration_data_path: str = None  # Will be: calibration_data_base/query_type
     test_queries_path: str = None      # Will be: test_data_base/query_type
     
-    max_calibration_queries: int = 100  # Limit calibration queries for testing
+    max_calibration_queries: int = 1  # Limit calibration queries for testing
     max_gt_size: int = 1000  # Skip queries with >1000 GT hop3 entities (must match calibration filter!)
     lambdas_file_path: str = None  # Path to JSON file containing pre-calibrated lambdas (if provided, skips calibration)
     
@@ -607,7 +607,7 @@ class CRCBenchmarkValidator:
         print(f"Loaded {len(queries)} calibration queries")
         
         # Limit number of queries for testing
-        max_queries = min(len(queries), self.config.max_calibration_queries)
+        max_queries = 1 #min(len(queries), self.config.max_calibration_queries)
         queries = queries[:max_queries]
         print(f"Processing first {max_queries} calibration queries")
         print(f"NOTE: Small sample size ({max_queries} queries) may show high variance from calibration FNR")

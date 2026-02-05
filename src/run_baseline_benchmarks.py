@@ -1525,11 +1525,13 @@ class BaselineRunner:
             model_name = _get_model_from_query_dir(self.query_dir)
             
             # Create pipeline model using the factory method
+            num_entities = graph_data.num_nodes if hasattr(graph_data, 'num_nodes') else None
             pipeline_args = argparse.Namespace(
                 device=device,
                 db_controller=db_controller,
                 max_internal_batch=getattr(self, 'ultra_batch_size', 64),
-                calib_batch_size=getattr(self, 'ultra_batch_size', 64)
+                calib_batch_size=getattr(self, 'ultra_batch_size', 64),
+                num_entities=num_entities,
             )
             hybrid_model = self._create_pipeline_model(ultra_model, dbexec_model, pipeline_args, device, model_name)
         
@@ -1684,8 +1686,14 @@ class BaselineRunner:
             'f1_excl_abstentions': f1_excl,
         }
     
-    def save_results(self, output_dir: str, skip_neo4j: bool = False):
-        """Save results to files."""
+    def save_results(self, output_dir: str, skip_neo4j: bool = False, json_suffix: str = None):
+        """Save results to files.
+        
+        Args:
+            output_dir: Directory to save results
+            skip_neo4j: If True, skip Neo4j results (deprecated, now auto-detected)
+            json_suffix: Optional suffix for the detailed JSON filename (e.g., "_0.7" -> baseline_detailed_results_0.7.json)
+        """
         os.makedirs(output_dir, exist_ok=True)
         
         # Save baseline results summary
@@ -1742,7 +1750,8 @@ class BaselineRunner:
                 self._serialize_result(r) for r in self.results['hybrid_static']
             ]
         
-        detailed_path = os.path.join(output_dir, "baseline_detailed_results.json")
+        json_filename = f"baseline_detailed_results{json_suffix}.json" if json_suffix else "baseline_detailed_results.json"
+        detailed_path = os.path.join(output_dir, json_filename)
         with open(detailed_path, 'w') as f:
             json.dump(detailed_results, f, indent=2)
         self.logger.info(f"Detailed results saved to: {detailed_path}")
@@ -1775,7 +1784,8 @@ class BaselineRunner:
             node_unique_id: str = "id", relation_unique_id: str = "type",
             skip_neo4j: bool = False, skip_ultra: bool = False, skip_hybrid: bool = True,
             compute_scores_only: bool = False, scores_cache: Optional[List[Dict]] = None,
-            min_threshold: float = 0.0, hybrid_thresholds: Optional[List[float]] = None):
+            min_threshold: float = 0.0, hybrid_thresholds: Optional[List[float]] = None,
+            json_suffix: str = None):
         """
         Run both baselines on benchmark queries.
         
@@ -1793,6 +1803,7 @@ class BaselineRunner:
             compute_scores_only: If True, only compute scores (no threshold application)
             scores_cache: Pre-computed Ultra scores (from previous run)
             min_threshold: Minimum threshold for computing scores (to avoid computing for all nodes)
+            json_suffix: Optional suffix for the detailed JSON filename (e.g., "_0.7")
         """
         # Store threshold for reporting
         self.threshold = static_threshold
@@ -1832,7 +1843,7 @@ class BaselineRunner:
         self.logger.info("\n" + "="*80)
         self.logger.info("Saving results...")
         self.logger.info("="*80)
-        self.save_results(output_dir, skip_neo4j=skip_neo4j)
+        self.save_results(output_dir, skip_neo4j=skip_neo4j, json_suffix=json_suffix)
                 
         return self.results
 
@@ -1959,12 +1970,12 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
     )
     scores_cache = result.get('scores_cache')
     
-    # Apply each threshold
+    # Apply each threshold - save all results in the same directory
+    # CSV is appended automatically, JSON gets threshold suffix
     for threshold in args.ultra_thresholds:
-        threshold_output_dir = os.path.join(args.output_dir, f"threshold_{threshold}")
         runner.results['ultra_neural'] = []  # Clear previous results
         runner.run(
-            output_dir=threshold_output_dir,
+            output_dir=args.output_dir,
             static_threshold=threshold,
             load_path=args.load_path,
             device=args.device,
@@ -1972,11 +1983,12 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
             neo4j_bolt_port=args.neo4j_bolt_port,
             node_unique_id=args.node_unique_id,
             relation_unique_id=args.relation_unique_id,
-            skip_neo4j=True,  # Skip Neo4j for threshold subdirectories
+            skip_neo4j=True,  # Skip Neo4j for threshold runs (already computed once)
             skip_ultra=skip_ultra,
-            skip_hybrid=True,  # Skip hybrid for threshold subdirectories
+            skip_hybrid=True,  # Skip hybrid for threshold runs
             scores_cache=scores_cache,
-            min_threshold=min_threshold
+            min_threshold=min_threshold,
+            json_suffix=f"_{threshold}"
         )
 
 
@@ -2049,6 +2061,8 @@ def main():
         args.skip_neo4j = skip_neo4j
         if args.baseline_type == "hybrid":
             skip_hybrid = False  # Run hybrid when baseline_type is "hybrid"
+        elif args.baseline_type in ("symbolic", "neural"):
+            skip_hybrid = True  # Skip hybrid when running symbolic or neural only
         else:
             skip_hybrid = args.skip_hybrid
     else:
@@ -2070,6 +2084,11 @@ def main():
     if args.ultra_thresholds and len(args.ultra_thresholds) >= 1:
         _run_with_multiple_thresholds(runner, args, args.skip_neo4j, skip_ultra)
     else:
+        # Determine json_suffix for hybrid baselines (to create separate JSON files per threshold)
+        json_suffix = None
+        if args.baseline_type == "hybrid" and args.hybrid_thresholds and len(args.hybrid_thresholds) > 0:
+            json_suffix = f"_{args.hybrid_thresholds[0]}"
+        
         runner.run(
             output_dir=args.output_dir,
             static_threshold=args.threshold,
@@ -2084,7 +2103,8 @@ def main():
             skip_hybrid=skip_hybrid,
             compute_scores_only=args.compute_scores_only,
             min_threshold=args.min_threshold,
-            hybrid_thresholds=args.hybrid_thresholds
+            hybrid_thresholds=args.hybrid_thresholds,
+            json_suffix=json_suffix
         )
 
 
