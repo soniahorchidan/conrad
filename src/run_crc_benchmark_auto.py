@@ -295,7 +295,7 @@ def main():
         epilog="Additional arguments after '--' will be passed to validate_crc_composition.py"
     )
     parser.add_argument("--confidence-levels", nargs='+', type=float, 
-                       default=[0.5, 0.6, 0.7],
+                       default=[0.7, 0.8, 0.9, 0.95],
                        help="Confidence levels to test (default: 0.5 0.6 0.7)")
     parser.add_argument("--max-calibration-queries", type=int, default=100,
                        help="Number of queries for calibration (default: 100)")

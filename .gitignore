@@ -210,7 +210,9 @@ __marimo__/
 
 # Conrad
 artifacts/databases/
-artifacts/snapshots/
+artifacts/snapshots/motif/
+artifacts/snapshots/ultra_*
+artifacts/snapshots/*/*cache
 artifacts/inference_logs/
 artifacts/data/yago310/
 artifacts/benchmark/

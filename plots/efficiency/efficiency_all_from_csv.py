@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 
 # Base path to benchmark results
-base_path = Path("/data/sonia/conrad/artifacts/benchmark")
+base_path = Path("/data/sonia/conrad/artifacts/plots_results")
 
 # Regex to find: | pred: X, GT: Y
 log_pattern = re.compile(r"pred: (\d+), GT: (\d+)")
@@ -23,7 +23,7 @@ def extract_differences_from_log(filepath):
     return diffs
 
 # --- Configuration ---
-datasets = ["fb15k-237", "nell-995", "yago3-10"]
+datasets = ["fb15k-237", "nell-955", "yago310"]
 dataset_labels = ["fb15k237", "nell995", "yago310"]
 query_types = ["3p", "2u", "2ip"]
 query_type_map = {

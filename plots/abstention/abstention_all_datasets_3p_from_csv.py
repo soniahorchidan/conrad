@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 
 # Base path to benchmark results
-base_path = Path("/data/sonia/conrad/artifacts/benchmark")
+base_path = Path("/data/sonia/conrad/artifacts/plots_results")
 
 # Configuration
 query_type = "ThreeHopPipeline"  # For 3p queries
@@ -42,25 +42,26 @@ def load_conrad_abstention(dataset, query_type, sparsity):
         return [np.nan] * len(confidence_levels)
 
 def load_neural_abstention(dataset, query_type, sparsity):
-    """Load Neural baseline abstention rates from CSV files."""
+    """Load Neural baseline abstention rates from CSV file."""
     dir_name = f"neural_bench_{dataset}_{query_type}_{sparsity}"
+    csv_path = base_path / dir_name / "baseline_results_summary.csv"
     
-    neural_dict = {}
-    for threshold in neural_thresholds:
-        csv_path = base_path / dir_name / f"threshold_{threshold}" / "baseline_results_summary.csv"
-        
-        if not csv_path.exists():
-            continue
-        
-        try:
-            df = pd.read_csv(csv_path)
-            neural_row = df[df['baseline'] == 'neural'].iloc[0]
-            neural_dict[threshold] = neural_row['abstention_rate']
-        except Exception as e:
-            print(f"Error loading Neural {dir_name}/threshold_{threshold}: {e}")
-            continue
+    if not csv_path.exists():
+        print(f"Neural not found: {dir_name}")
+        return {}
     
-    return neural_dict
+    try:
+        df = pd.read_csv(csv_path)
+        neural_rows = df[df['baseline'] == 'neural']
+        neural_dict = {}
+        for _, row in neural_rows.iterrows():
+            threshold = row['threshold']
+            if threshold in neural_thresholds:
+                neural_dict[threshold] = row['abstention_rate']
+        return neural_dict
+    except Exception as e:
+        print(f"Error loading Neural {dir_name}: {e}")
+        return {}
 
 def load_hybrid_abstention(dataset, query_type, sparsity):
     """Load Hybrid baseline abstention rates from CSV file."""
@@ -109,7 +110,8 @@ datasets = {}
 missing_levels = [5, 20, 40]
 dataset_configs = [
     ('FB15k-237', 'fb15k-237'),
-    ('NELL-995', 'nell-995')
+    # ('NELL-995', 'nell-955'),
+    # ('YAGO3-10', 'yago310')
 ]
 
 for display_name, dataset_key in dataset_configs:
@@ -133,7 +135,10 @@ dataset_names = [name for name, _ in dataset_configs]
 # PLOTTING
 # ============================================================================
 
-fig, axes = plt.subplots(len(dataset_names), 3, figsize=(8, 4), sharex=True, sharey=True)
+nrows = len(dataset_names)
+fig, axes = plt.subplots(nrows, 3, figsize=(6, 2 * nrows), sharex=True, sharey=True)
+if nrows == 1:
+    axes = axes[np.newaxis, :]  # Ensure 2D indexing works
 
 for row_idx, d_name in enumerate(dataset_names):
     for col_idx, m_level in enumerate(missing_levels):
@@ -146,27 +151,29 @@ for row_idx, d_name in enumerate(dataset_names):
         
         # 2. Plot Symbolic as a horizontal line
         if not np.isnan(data['symbolic']):
-            ax.axhline(y=data['symbolic'], color='grey', linestyle='--', linewidth=1.5, label='symbolic')
+            ax.axhline(y=data['symbolic'], color='black', linestyle='--', linewidth=2.5, alpha=0.7, zorder=3, label='symbolic')
 
         # 3. Plot Neural as horizontal lines
+        # Warm palette — all saturated, colorblind-safe (Paul Tol vibrant)
         neural_data = data['neural']
-        neural_colors = ['#fee08b', '#fdae61', '#f46d43', '#d73027']
+        neural_colors = ['#9ecae1', '#4292c6', '#2171b5', '#084594']
         for i, (thresh, val) in enumerate(neural_data.items()):
-            ax.axhline(y=val, color=neural_colors[i], linestyle='-', linewidth=2, label=f'neural (t={thresh})')
+            ax.axhline(y=val, color=neural_colors[i], linestyle='-', linewidth=2.5, alpha=0.7, label=f'neural (t={thresh})')
 
         # 4. Plot Hybrid as horizontal lines
+        # Cool palette — all saturated, colorblind-safe (Paul Tol vibrant)
         hybrid_data = data['hybrid']
-        hybrid_colors = ['#c7e9c0', '#a1d99b', '#74c476', '#41ab5d']  # Green shades
+        hybrid_colors = ['#c7e9c0', '#a1d99b', '#74c476', '#31a354', '#006d2c']
         for i, (thresh, val) in enumerate(hybrid_data.items()):
             color_idx = hybrid_thresholds.index(thresh) if thresh in hybrid_thresholds else 0
-            ax.axhline(y=val, color=hybrid_colors[color_idx], linestyle=':', linewidth=2, label=f'hybrid (t={thresh})')
+            ax.axhline(y=val, color=hybrid_colors[color_idx], linestyle=':', linewidth=2.5, alpha=0.7, label=f'hybrid (t={thresh})')
 
         # Formatting
         if row_idx == 0:
             ax.set_title(f'{m_level}% Missing Data', fontsize=10)
         if col_idx == 0:
             ax.set_ylabel(f'{d_name}\nAbstention Rate', fontsize=10)
-        if row_idx == 1:
+        if row_idx == len(dataset_names) - 1:
             ax.set_xlabel('Target Recall', fontsize=10)
         
         ax.set_xticks(x)
@@ -174,11 +181,11 @@ for row_idx, d_name in enumerate(dataset_names):
         ax.grid(True, alpha=0.6, zorder=0)
         
         # Adjust Y limits
-        ax.set_ylim(0, 0.7)
+        ax.set_ylim(0, 0.9)
 
 # Create a custom legend with all entries from a subplot that has data
 handles, labels = axes[0, 1].get_legend_handles_labels()
-fig.legend(handles, labels, loc='upper left', bbox_to_anchor=(0, 1.06), ncols=6, fontsize=8)
+fig.legend(handles, labels, loc='upper left', bbox_to_anchor=(0.00, 1.35), ncols=4, fontsize=9)
 plt.tight_layout()
-plt.savefig('conrad_abstention_3p_from_csv.png', dpi=300, bbox_inches='tight')
-print("\nPlot saved to conrad_abstention_3p_from_csv.png")
+plt.savefig('conrad_abstention.png', dpi=300, bbox_inches='tight')
+print("\nPlot saved to conrad_abstention.png")
