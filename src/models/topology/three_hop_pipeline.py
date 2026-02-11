@@ -11,6 +11,11 @@ class ThreeHopPipeline(BasePipeline):
     A wrapper pipeline model that uses MultiHopPredictor
     to approximate each hop of a 3-hop path.
     """
+    
+    # Configuration for max additional candidates during GT filtering (for calibration efficiency)
+    # Format: {hop_num: max_additional_candidates}
+    # None means include all candidates that pass threshold
+    MAX_ADDITIONAL_CANDIDATES = {1: 1, 2: 1, 3: None}
 
     def __init__(self, ultra_model, dbexec_model, args: Namespace, device: str):
         super().__init__(ultra_model, dbexec_model, args, device)
@@ -181,7 +186,9 @@ class ThreeHopPipeline(BasePipeline):
                 nodes = self._extract_nodes_from_scores(scores, threshold)
                 
                 if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, orig_idx, 1):
-                    nodes = self._apply_gt_filtering(nodes, scores.squeeze(0), ground_truth_hops[orig_idx][1], max_nodes=50)
+                    # Include ALL GT nodes passing threshold + limited additional candidates
+                    max_additional_candidates = self.MAX_ADDITIONAL_CANDIDATES[1]
+                    nodes = self._apply_gt_filtering(nodes, scores.squeeze(0), ground_truth_hops[orig_idx][1], max_additional_candidates=max_additional_candidates, threshold=threshold)
                 
                 all_nodes[orig_idx] = nodes
                 if keep_scores:
@@ -299,8 +306,9 @@ class ThreeHopPipeline(BasePipeline):
             return path_scores, set()
 
         # Apply threshold to MAX-aggregated scores, and optionally filter by GT
+        # During calibration: include ALL GT nodes that pass threshold + limited additional candidates
         gt_nodes = None
-        max_gt_nodes = {1: 50, 2: 50, 3: None}[hop_num]
+        max_additional_candidates = self.MAX_ADDITIONAL_CANDIDATES[hop_num]
         if use_ground_truth and self._has_gt_for_hop(ground_truth_hops, query_idx, hop_num):
             gt_nodes = ground_truth_hops[query_idx][hop_num]
         
@@ -310,7 +318,8 @@ class ThreeHopPipeline(BasePipeline):
                 nodes,
                 max_scores,
                 gt_nodes,
-                max_gt_nodes,
+                max_additional_candidates,
+                threshold,
             )
         
         return path_scores, set(nodes)
@@ -330,8 +339,23 @@ class ThreeHopPipeline(BasePipeline):
         return hop2_to_hop1
     
     def _apply_gt_filtering(self, nodes: List[int], scores: torch.Tensor, 
-                           gt_nodes: List[int], max_nodes: Optional[int]) -> List[int]:
-        """Apply ground truth filtering with safety limits (pure torch, no CPU transfers)."""
+                           gt_nodes: List[int], max_additional_candidates: Optional[int], threshold: float) -> List[int]:
+        """
+        Apply ground truth filtering for calibration efficiency.
+        
+        Returns: ALL GT nodes that pass threshold + up to max_additional_candidates top-scoring non-GT nodes.
+        
+        Args:
+            nodes: Candidate nodes that passed threshold
+            scores: Score tensor for all entities
+            gt_nodes: Ground truth nodes for this hop
+            max_additional_candidates: Maximum number of additional (non-GT) candidate nodes to include.
+                                      None means include all candidates that pass threshold.
+            threshold: Threshold value for filtering
+        
+        Returns:
+            List of nodes: all GT nodes passing threshold + additional candidates
+        """
         if not gt_nodes:
             return nodes
 
@@ -345,42 +369,47 @@ class ThreeHopPipeline(BasePipeline):
         if gt_t.numel() == 0:
             return nodes
 
-        min_gt_score = scores_1d[gt_t].min()
+        # Filter GT nodes to only include those that pass the threshold
+        gt_scores = scores_1d[gt_t]
+        gt_passing_mask = gt_scores >= threshold
+        gt_passing = gt_t[gt_passing_mask]
+        
+        # Convert GT nodes that pass threshold to set for fast lookup
+        gt_set = set(int(x) for x in gt_passing.detach().cpu().tolist())
 
-        # Filter candidate nodes by min GT score
+        # Filter candidate nodes: exclude GT nodes, keep valid indices
         nodes_t = torch.as_tensor(nodes, dtype=torch.long, device=device)
         nodes_t = nodes_t[(nodes_t >= 0) & (nodes_t < num_entities)]
-        if nodes_t.numel() == 0:
-            return []
+        
+        # Exclude GT nodes from candidates
+        candidate_mask = torch.tensor([int(x) not in gt_set for x in nodes_t.detach().cpu().tolist()], device=device)
+        candidate_nodes = nodes_t[candidate_mask]
+        
+        if candidate_nodes.numel() == 0:
+            # Only GT nodes that passed threshold, return them
+            return [int(x) for x in gt_passing.detach().cpu().tolist()]
 
-        node_scores = scores_1d[nodes_t]
-        keep_mask = node_scores >= min_gt_score
-        kept_nodes = nodes_t[keep_mask]
-        if kept_nodes.numel() == 0:
-            # Preserve old behavior: can return empty after GT-based filtering
-            return []
+        # Get top max_additional_candidates (excluding GT nodes)
+        if max_additional_candidates is not None and candidate_nodes.numel() > 0:
+            candidate_scores = scores_1d[candidate_nodes]
+            k = int(min(max_additional_candidates, candidate_nodes.numel()))
+            _, topk_idx = torch.topk(candidate_scores, k, largest=True, sorted=True)
+            top_candidates = candidate_nodes[topk_idx]
+            top_candidates_list = [int(x) for x in top_candidates.detach().cpu().tolist()]
+        else:
+            # Include all candidates that pass threshold (when max_additional_candidates is None)
+            top_candidates_list = [int(x) for x in candidate_nodes.detach().cpu().tolist()]
 
-        # Optional cap (keep top by score, but always include all GT nodes)
-        if max_nodes is not None and kept_nodes.numel() > max_nodes:
-            kept_scores = scores_1d[kept_nodes]
-            k = int(min(max_nodes, kept_nodes.numel()))
-            _, topk_idx = torch.topk(kept_scores, k, largest=True, sorted=True)
-            top_nodes = kept_nodes[topk_idx]
+        # Return: GT nodes that passed threshold + top candidates
+        gt_list = [int(x) for x in gt_passing.detach().cpu().tolist()]
+        filtered_nodes = gt_list + top_candidates_list
 
-            top_list = [int(x) for x in top_nodes.detach().cpu().tolist()]
-            top_set = set(top_list)
-            missing_gt = [int(x) for x in gt_t.detach().cpu().tolist() if int(x) not in top_set]
-
-            filtered_nodes = top_list + missing_gt
-
-            logging.debug(
-                f"GT filtering: top {max_nodes}={len(top_list)}, "
-                f"GT nodes={len(gt_t)}, missing GT={len(missing_gt)}, "
-                f"final={len(filtered_nodes)}"
-            )
-            return filtered_nodes
-
-        return [int(x) for x in kept_nodes.detach().cpu().tolist()]
+        logging.debug(
+            f"GT filtering: GT nodes passing threshold={len(gt_list)}, "
+            f"top candidates={len(top_candidates_list)}, "
+            f"final={len(filtered_nodes)}"
+        )
+        return filtered_nodes
     
     def _has_gt_for_hop(self, ground_truth_hops: Optional[List[Dict]], 
                        query_idx: int, hop_num: int) -> bool:

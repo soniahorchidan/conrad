@@ -120,13 +120,13 @@ class CalibrationManager:
         Args:
             cal_scores: Calibration scores
             true_labels: True labels
-            alphas: List of alpha values to calibrate for (default: [0.1, 0.2, 0.3, 0.4, 0.5])
+            alphas: List of alpha values to calibrate for (default: [0.05, 0.1, 0.2, 0.3, 0.4])
             
         Returns:
             Dictionary mapping alpha values to thresholds
         """
         if alphas is None:
-            alphas = np.arange(0.1, 0.51, 0.1)
+            alphas = [0.05, 0.1, 0.2, 0.3, 0.4]
         
         validate_calibration_data(cal_scores, true_labels)
         query_type = get_query_type_from_model(self.model_name)
