@@ -10,7 +10,7 @@ base_path = Path("/data/sonia/conrad/artifacts/plots_results")
 query_type = "ThreeHopPipeline"  # For 3p queries
 confidence_levels = [0.5, 0.6, 0.7, 0.8, 0.9]
 neural_thresholds = [0.7, 0.8, 0.9, 0.99]
-hybrid_thresholds = [0.45, 0.5, 0.6, 0.7]
+hybrid_thresholds = [0.5, 0.6, 0.7]  # Excluding 0.45
 
 # Setup
 x_labels = ['0.5', '0.6', '0.7', '0.8', '0.9']
@@ -147,26 +147,25 @@ for row_idx, d_name in enumerate(dataset_names):
         
         # 1. Plot CONRAD as bars
         conrad_vals = data['conrad']
-        ax.bar(x, conrad_vals, width, label='conrad', color='lightgray', edgecolor='black', zorder=2)
+        ax.bar(x, conrad_vals, width, label='conrad', color='lightgray', edgecolor='black', zorder=6)
         
         # 2. Plot Symbolic as a horizontal line
         if not np.isnan(data['symbolic']):
             ax.axhline(y=data['symbolic'], color='black', linestyle='--', linewidth=2.5, alpha=0.7, zorder=3, label='symbolic')
 
         # 3. Plot Neural as horizontal lines
-        # Warm palette — all saturated, colorblind-safe (Paul Tol vibrant)
         neural_data = data['neural']
-        neural_colors = ['#9ecae1', '#4292c6', '#2171b5', '#084594']
+        neural_colors = ['#942c4a', '#ca4641', '#e57d56', '#edad8d']
         for i, (thresh, val) in enumerate(neural_data.items()):
-            ax.axhline(y=val, color=neural_colors[i], linestyle='-', linewidth=2.5, alpha=0.7, label=f'neural (t={thresh})')
+            ax.axhline(y=val, color=neural_colors[i], linestyle='-', linewidth=2.5, label=f'neural (t={thresh})')
 
         # 4. Plot Hybrid as horizontal lines
-        # Cool palette — all saturated, colorblind-safe (Paul Tol vibrant)
+        # Cool palette — saturated blue shades, colorblind-safe
         hybrid_data = data['hybrid']
-        hybrid_colors = ['#c7e9c0', '#a1d99b', '#74c476', '#31a354', '#006d2c']
+        hybrid_colors = ['#386782', '#56be9c', '#a9dfac']
         for i, (thresh, val) in enumerate(hybrid_data.items()):
             color_idx = hybrid_thresholds.index(thresh) if thresh in hybrid_thresholds else 0
-            ax.axhline(y=val, color=hybrid_colors[color_idx], linestyle=':', linewidth=2.5, alpha=0.7, label=f'hybrid (t={thresh})')
+            ax.axhline(y=val, color=hybrid_colors[color_idx], linestyle=':', linewidth=2.5,label=f'hybrid (t={thresh})')
 
         # Formatting
         if row_idx == 0:
@@ -185,7 +184,7 @@ for row_idx, d_name in enumerate(dataset_names):
 
 # Create a custom legend with all entries from a subplot that has data
 handles, labels = axes[0, 1].get_legend_handles_labels()
-fig.legend(handles, labels, loc='upper left', bbox_to_anchor=(0.00, 1.35), ncols=4, fontsize=9)
+fig.legend(handles, labels, loc='upper left', bbox_to_anchor=(0.1, 1.3), ncols=4, fontsize=8)
 plt.tight_layout()
 plt.savefig('conrad_abstention.png', dpi=300, bbox_inches='tight')
 print("\nPlot saved to conrad_abstention.png")

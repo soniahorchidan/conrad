@@ -6,7 +6,7 @@ from pathlib import Path
 
 # Configuration for the 2x2 plot (FB15k-237 and NELL-995 across sparsity levels)
 datasets = [("FB15k-237", "fb15k-237"), ("NELL-995", "nell-955")]
-sparsities = ["5% Missing Data", "40% Missing Data"]
+sparsities = ["5% sparsity", "40% sparsity"]
 sparsity_values = [5, 40]
 confidence_levels = [0.6, 0.7, 0.8, 0.9]
 
@@ -34,13 +34,13 @@ def load_data(dataset, query_type, sparsity):
         return None, None
 
 # --- Plotting Setup ---
-fig, axes = plt.subplots(2, 2, figsize=(5, 2.5), sharey=True, sharex=True)
+fig, axes = plt.subplots(2, 2, figsize=(5, 3), sharey=True, sharex=True)
 
 # Helper to plot data safely
 def plot_panel(ax, target_recall, empirical_recall, label, color, marker):
     if target_recall is not None and empirical_recall is not None:
         ax.plot(target_recall, empirical_recall, marker=marker, 
-                label=label, color=color, linewidth=2.5, markersize=7)
+                label=label, color=color, linewidth=2, markersize=5)
 
 for r, (dataset_name, dataset_key) in enumerate(datasets):  # Rows: datasets
     for c, sparsity_val in enumerate(sparsity_values):  # Columns: sparsity levels

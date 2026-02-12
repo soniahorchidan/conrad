@@ -44,7 +44,7 @@ fig, axes = plt.subplots(1, 3, figsize=(5, 2), sharey=True)
 def plot_panel(ax, target_recall, empirical_recall, label, color, marker):
     if target_recall is not None and empirical_recall is not None:
         ax.plot(target_recall, empirical_recall, marker=marker, 
-                label=label, color=color, linewidth=2.5, markersize=7)
+                label=label, color=color, linewidth=2, markersize=5)
 
 for c in range(3):  # Datasets
     ax = axes[c]

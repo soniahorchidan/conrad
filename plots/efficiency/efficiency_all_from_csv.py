@@ -23,21 +23,21 @@ def extract_differences_from_log(filepath):
     return diffs
 
 # --- Configuration ---
-datasets = ["fb15k-237", "nell-955", "yago310"]
-dataset_labels = ["fb15k237", "nell995", "yago310"]
-query_types = ["3p", "2u", "2ip"]
+datasets = ["nell-955",]
+dataset_labels = ["nell995"]
+query_types = ["3p", "2ip"]
 query_type_map = {
     "3p": "ThreeHopPipeline",
-    "2u": "TwoUnionPipeline",
+    # "2u": "TwoUnionPipeline",
     "2ip": "TwoIntersectProjectPipeline"
 }
-confidence_levels = ['0.5', '0.6', '0.7', '0.8', '0.9']
+confidence_levels = ['0.6', '0.7', '0.8', '0.9']
 sparsity = 20  # Using 20% missing data
 
-fig, axes = plt.subplots(3, 3, figsize=(15, 5), sharey=True)
+fig, axes = plt.subplots(len(query_types), len(datasets), figsize=(5*len(datasets),2.5), sharey=True, squeeze=False)
 
-for r, (dataset, d_label) in enumerate(zip(datasets, dataset_labels)):
-    for c, q_type in enumerate(query_types):
+for r, q_type in enumerate(query_types):
+    for c, (dataset, d_label) in enumerate(zip(datasets, dataset_labels)):
         ax = axes[r, c]
         
         # Construct the directory path
@@ -69,20 +69,21 @@ for r, (dataset, d_label) in enumerate(zip(datasets, dataset_labels)):
             print(f"Directory not found: {dir_name}")
         
         # Titles and labels
-        if r == 0: ax.set_title(q_type, fontsize=12)
-        if c == 0: ax.set_ylabel(f"{d_label}\nTarget Recall", fontsize=11)
-        if r == 2: ax.set_xlabel("|Pred| - |GT|", fontsize=11)
+        if c == 0: ax.set_ylabel(f"{q_type}\nTarget Recall", fontsize=9)
+        # if r == 0 and c == 0: ax.set_title(d_label, fontsize=12)
+        if r == len(query_types) - 1: ax.set_xlabel("|Pred| - |GT|", fontsize=9)
         
         ax.grid(True, alpha=0.6)
 
 # Set yticks and labels once for all subplots (since sharey=True)
 for ax in axes.flat:
     ax.set_yticks(range(1, len(confidence_levels) + 1))
-    ax.set_yticklabels(confidence_levels)
+    ax.set_yticklabels(confidence_levels, fontsize=9)
+    ax.tick_params(axis='x', labelsize=9)
 
 # Place the legend in the upper left
-handles = [plt.Line2D([0], [0], color='red', linestyle='--', label='Perfect Plan')]
-fig.legend(handles=handles, loc='upper left', bbox_to_anchor=(0.03, 1), fontsize=10)
+handles = [plt.Line2D([0], [0], color='red', linestyle='--', label='Ground Truth')]
+fig.legend(handles=handles, loc='upper left', fontsize=9, bbox_to_anchor=(0.1, 1.07))
 
 plt.tight_layout()
 plt.savefig('conrad_efficiency_all_from_csv.png', dpi=300, bbox_inches='tight')

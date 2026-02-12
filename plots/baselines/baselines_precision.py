@@ -4,7 +4,7 @@ from pathlib import Path
 
 # --- Configuration ---
 alphas = [0.6, 0.7, 0.8, 0.9]
-sparsities = ["5% Missing Data", "20% Missing Data", "40% Missing Data"]
+sparsities = ["5% sparsity", "20% sparsity", "40% sparsity"]
 sparsity_values = [5, 20, 40]
 datasets = ["fb15k-237", "nell-955", "yago310"]
 dataset_labels = ["FB15K-237", "NELL-955", "YAGO3-10"]
@@ -49,6 +49,9 @@ def load_neural_data(dataset, sparsity):
         df = pd.read_csv(csv_path)
         # Get all neural rows (sorted by threshold)
         neural_rows = df[df['baseline'] == 'neural'].sort_values('threshold')
+        if len(neural_rows) == 0:
+            print(f"  No neural rows found in {csv_path}")
+            return None, None
         recalls = neural_rows['recall'].tolist()
         precisions = neural_rows['precision'].tolist()
         return recalls, precisions
@@ -141,14 +144,14 @@ for row, dataset in enumerate(datasets):
 
         # Plot Neural Points (different markers for each threshold)
         n_data = data[dataset]["neural"][col]
-        if n_data[0] is not None and n_data[1] is not None:
+        if n_data[0] is not None and n_data[1] is not None and len(n_data[0]) > 0 and len(n_data[1]) > 0:
             n_r, n_p = n_data[0], n_data[1]
             for i, (r, p) in enumerate(zip(n_r, n_p)):
                 label = f'neural (t={neural_thresholds[i]})' if row == 0 and col == 0 else None
                 ax.scatter(r, p, marker=neural_markers[i], color='C1', s=50, 
-                          edgecolors='black', linewidths=1, label=label, zorder=2)
+                          edgecolors='black', linewidths=1, label=label, zorder=7)
             # Draw dashed line connecting neural points
-            ax.plot(n_r, n_p, linestyle='--', color='C1', linewidth=2, alpha=0.5, zorder=3)
+            ax.plot(n_r, n_p, linestyle='--', color='C1', linewidth=2, alpha=0.5, zorder=6)
 
         # Plot Hybrid Points (different markers for each threshold)
         h_data = data[dataset]["hybrid"][col]
