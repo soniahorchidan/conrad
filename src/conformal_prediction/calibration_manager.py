@@ -126,7 +126,7 @@ class CalibrationManager:
             Dictionary mapping alpha values to thresholds
         """
         if alphas is None:
-            alphas = [0.05, 0.1, 0.2, 0.3, 0.4]
+            alphas = [0.1, 0.2, 0.3, 0.4]
         
         validate_calibration_data(cal_scores, true_labels)
         query_type = get_query_type_from_model(self.model_name)

@@ -204,16 +204,6 @@ class VectorOptimizer:
             if not np.any(np.isfinite(calibration_scores[:, j])):
                 raise ValueError(f"No finite scores for hop {j+1}") 
 
-        # if self.query_type == '2ip':
-        #     hop_exponents = [0.85, 0.85, 1.02]
-        # elif self.query_type == '3p':
-        #     hop_exponents = [0.85, 1.30, 1.02]
-        # elif self.query_type == '2u':
-        #     hop_exponents = [0.9, 0.9]
-        # else:
-        #     raise ValueError(f"Unsupported query_type='{self.query_type}'. Supported: '2ip', '3p', '2u'.")
-
-
         if self.query_type == '2ip':
             hop_exponents = [1, 1, 1]
         elif self.query_type == '3p':
@@ -228,43 +218,6 @@ class VectorOptimizer:
         # Aggregate using MAX per query (shape: (N, k, num_entities) -> (N, k))
         aggregated_scores = np.max(calibration_scores, axis=2)
 
-        # # 1. Calculate the 'Quality' of each hop based on GT scores
-        # # High mean score = High confidence = We can afford to be stricter (Lower Exponent)
-        # hop_means = []
-        # for j in range(self.k):
-        #     # Get valid GT scores for this hop
-        #     valid_scores = aggregated_scores[:, j]
-        #     valid_scores = valid_scores[np.isfinite(valid_scores)]
-            
-        #     if len(valid_scores) > 0:
-        #         mean_score = np.mean(valid_scores)
-        #     else:
-        #         mean_score = 0.5 # Fallback
-            
-        #     # Clip to avoid division by zero or extreme outliers
-        #     mean_score = np.clip(mean_score, 0.1, 0.99)
-        #     hop_means.append(mean_score)
-        
-        # hop_means = np.array(hop_means)
-        
-        # # 2. Compute Auto-Exponents: Inverse Proportionality
-        # # Base idea: Exponent ~ (Global Average / Hop Average)
-        # # If Hop 1 has mean 0.9 and Global is 0.6 -> Exp = 0.66 (Strict)
-        # # If Hop 2 has mean 0.3 and Global is 0.6 -> Exp = 2.0 (Loose)
-        # global_mean = np.mean(hop_means)
-        
-        # # Add a 'dampening factor' (power) to control how aggressive the tuning is.
-        # # power=1.0 is linear. power=0.0 makes all exponents 1.0 (uniform).
-        # # power=0.5 is a safe, conservative setting for VLDB.
-        # tuning_aggression = 1.0 
-        
-        # hop_exponents = (global_mean / hop_means) ** tuning_aggression
-        
-        # 3. Safety Constraints
-        # Cap exponents to prevent them from going wild (e.g., 0.01 or 10.0)
-        # hop_exponents = np.clip(hop_exponents, 0.5, 2.0)
-        # logging.info(f"Auto-tuned exponents based on score means {np.round(hop_means, 3)}: {np.round(hop_exponents, 3)}")
-        
         # 3. Generate all candidates
         for i in range(num_levels):
             q = quantiles[i]
