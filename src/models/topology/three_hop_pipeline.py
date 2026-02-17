@@ -50,6 +50,86 @@ class ThreeHopPipeline(BasePipeline):
             )
             predictions.append(hop3_predictions)
         return predictions
+
+    @staticmethod
+    def apply_thresholds_to_scores_with_call_counts(
+        cal_scores: List[Dict[str, Any]], thresholds: List[float],
+        true_labels: Optional[List[Dict]] = None,
+        num_entities: int = 14541,
+    ) -> Tuple[List[List[int]], List[int], List[int]]:
+        """
+        Apply thresholds to calibration scores and return predictions plus estimated
+        neo4j/ultra call counts per query (from cascade structure).
+        Returns (predictions, neo4j_per_query, ultra_per_query).
+        """
+        predictions = []
+        neo4j_per_query = []
+        ultra_per_query = []
+        for query_data in cal_scores:
+            hop1_valid = ThreeHopPipeline._process_hop1_for_calibration(query_data, thresholds[0])
+            if not hop1_valid:
+                predictions.append([])
+                neo4j_per_query.append(1)
+                ultra_per_query.append(1)
+                continue
+            n_hop2 = sum(1 for p in query_data['hop2'] if p.get('parent') in hop1_valid)
+            hop2_valid = ThreeHopPipeline._process_hop2_for_calibration(
+                query_data, thresholds[1], hop1_valid, num_entities
+            )
+            if not hop2_valid:
+                predictions.append([])
+                neo4j_per_query.append(1 + n_hop2)
+                ultra_per_query.append(1 + n_hop2)
+                continue
+            n_hop3 = sum(
+                1 for p in query_data['hop3']
+                if p.get('parent', (None, None))[0] in hop1_valid
+                and p.get('parent', (None, None))[1] in hop2_valid
+            )
+            hop3_predictions = ThreeHopPipeline._process_hop3_for_calibration(
+                query_data, thresholds[2], hop1_valid, hop2_valid, num_entities
+            )
+            predictions.append(hop3_predictions)
+            neo4j_per_query.append(1 + n_hop2 + n_hop3)
+            ultra_per_query.append(1 + n_hop2 + n_hop3)
+        return predictions, neo4j_per_query, ultra_per_query
+
+    @staticmethod
+    def apply_thresholds_to_scores_with_intermediate_sizes(
+        cal_scores: List[Dict[str, Any]], thresholds: List[float],
+        true_labels: Optional[List[Dict]] = None,
+        num_entities: int = 14541,
+    ) -> Tuple[List[List[int]], List[Tuple[int, int, int]]]:
+        """
+        Apply thresholds and return predictions plus intermediate set sizes per query.
+        Returns (predictions, list of (s1, s2, s3) per query where s_i = size at hop i).
+        """
+        predictions = []
+        intermediate_sizes = []
+        for query_data in cal_scores:
+            hop1_valid = ThreeHopPipeline._process_hop1_for_calibration(query_data, thresholds[0])
+            s1 = len(hop1_valid)
+            if not hop1_valid:
+                predictions.append([])
+                intermediate_sizes.append((s1, 0, 0))
+                continue
+            
+            hop2_valid = ThreeHopPipeline._process_hop2_for_calibration(
+                query_data, thresholds[1], hop1_valid, num_entities
+            )
+            s2 = len(hop2_valid)
+            if not hop2_valid:
+                predictions.append([])
+                intermediate_sizes.append((s1, s2, 0))
+                continue
+            
+            hop3_predictions = ThreeHopPipeline._process_hop3_for_calibration(
+                query_data, thresholds[2], hop1_valid, hop2_valid, num_entities
+            )
+            s3 = len(hop3_predictions)
+            predictions.append(hop3_predictions)
+            intermediate_sizes.append((s1, s2, s3))
+        return predictions, intermediate_sizes
     
     @staticmethod
     def _process_hop1_for_calibration(query_data: Dict, threshold: float) -> set:
@@ -105,21 +185,27 @@ class ThreeHopPipeline(BasePipeline):
     
     @torch.no_grad()
     def predict_with_thresholds(self, query: torch.Tensor, lamhat: List[float], graph_data: Any,
-                               ground_truth_hops: Optional[List[Dict]] = None) -> List[List[int]]:
-        """Run cascade inference with threshold-based filtering at each hop."""
-        # Inference only needs hop3 nodes; avoid carrying around dense per-path score tensors.
+                               ground_truth_hops: Optional[List[Dict]] = None) -> Tuple[List[List[int]], List[int], List[int]]:
+        """Run cascade inference with threshold-based filtering at each hop.
+        Returns (predictions_per_query, neo4j_calls_per_query, ultra_calls_per_query)."""
+        batch_size = query.shape[0] if query.dim() > 1 else 1
+        if query.dim() == 1:
+            query = query.unsqueeze(0)
+        counts = [[0, 0] for _ in range(batch_size)]  # [neo4j, ultra] per query
         hop1_results = self._process_hop1(
-            query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None, keep_scores=False
+            query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None, keep_scores=False, counts=counts
         )
         hop2_results = self._process_hop2(
             hop1_results, query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None,
-            keep_path_scores=False,
+            keep_path_scores=False, counts=counts,
         )
         hop3_results = self._process_hop3(
             hop2_results, query, lamhat, graph_data, ground_truth_hops, ground_truth_hops is not None,
-            keep_path_scores=False,
+            keep_path_scores=False, counts=counts,
         )
-        return hop3_results["nodes"]
+        neo4j_per_query = [c[0] for c in counts]
+        ultra_per_query = [c[1] for c in counts]
+        return hop3_results["nodes"], neo4j_per_query, ultra_per_query
     
     @torch.no_grad()
     def _predict(self, query: torch.Tensor, lamhat: List[float], graph_data: Any, 
@@ -149,7 +235,7 @@ class ThreeHopPipeline(BasePipeline):
     
     def _process_hop1(self, query: torch.Tensor, lamhat: List[float], graph_data: Any, 
                      ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
-                     keep_scores: bool = True) -> Dict[str, Any]:
+                     keep_scores: bool = True, counts: Optional[List[List[int]]] = None) -> Dict[str, Any]:
         """Process hop 1 for all queries in batch, batching queries with same relation type for efficiency."""
         batch_size = query.shape[0]
         all_nodes = [None] * batch_size
@@ -173,7 +259,13 @@ class ThreeHopPipeline(BasePipeline):
             rel_tensor = torch.tensor([[relation]] * len(sources), dtype=torch.long, device=self.device)
             
             # Predict for all queries in this batch at once
-            batch_scores, _ = self.unified_predictor.predict(source_tensor, rel_tensor, graph_data, threshold=threshold)
+            batch_scores, _, neo4j_calls, ultra_calls = self.unified_predictor.predict(
+                source_tensor, rel_tensor, graph_data, threshold=threshold
+            )
+            if counts is not None:
+                for orig_idx in indices:
+                    counts[orig_idx][0] += neo4j_calls
+                    counts[orig_idx][1] += ultra_calls
             
             # Extract results for each query
             for batch_idx, orig_idx in enumerate(indices):
@@ -193,24 +285,25 @@ class ThreeHopPipeline(BasePipeline):
     
     def _process_hop2(self, hop1_results: Dict[str, Any], query: torch.Tensor, lamhat: List[float], 
                      graph_data: Any, ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
-                     keep_path_scores: bool = True) -> Dict[str, Any]:
+                     keep_path_scores: bool = True, counts: Optional[List[List[int]]] = None) -> Dict[str, Any]:
         """Process hop 2 for all queries in batch using MAX-then-threshold aggregation."""
         return self._process_multi_source_hop(
             hop_num=2, prev_results=hop1_results, query=query, 
             relation_idx=2, lamhat=lamhat, graph_data=graph_data,
             ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth,
-            keep_path_scores=keep_path_scores,
+            keep_path_scores=keep_path_scores, counts=counts,
         )
     
     def _process_hop3(self, hop2_results: Dict[str, Any], query: torch.Tensor, lamhat: List[float], 
                      graph_data: Any, ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
-                     keep_path_scores: bool = True) -> Dict[str, Any]:
+                     keep_path_scores: bool = True, counts: Optional[List[List[int]]] = None) -> Dict[str, Any]:
         """Process hop 3 for all queries in batch using MAX-then-threshold aggregation."""
         return self._process_multi_source_hop(
             hop_num=3, prev_results=hop2_results, query=query, 
             relation_idx=3, lamhat=lamhat, graph_data=graph_data,
             ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth,
             keep_path_scores=keep_path_scores,
+            counts=counts,
             parent_map_builder=(
                 (lambda i: self._build_hop2_to_hop1_map(
                     hop2_results.get("scores", [])[i] if hop2_results.get("path_aware") else [],
@@ -226,7 +319,8 @@ class ThreeHopPipeline(BasePipeline):
                                    graph_data: Any, ground_truth_hops: Optional[List[Dict]], 
                                    use_ground_truth: bool, 
                                    parent_map_builder: Optional[callable] = None,
-                                   keep_path_scores: bool = True) -> Dict[str, Any]:
+                                   keep_path_scores: bool = True,
+                                   counts: Optional[List[List[int]]] = None) -> Dict[str, Any]:
         """Unified processing for hop2 and hop3 (multi-source hops)."""
         batch_size = query.shape[0]
         all_nodes, all_scores = [], []
@@ -242,6 +336,7 @@ class ThreeHopPipeline(BasePipeline):
                 ground_truth_hops=ground_truth_hops, use_ground_truth=use_ground_truth,
                 parent_map=parent_map,
                 keep_path_scores=keep_path_scores,
+                counts=counts,
             )
             
             all_nodes.append(list(filtered_nodes))
@@ -258,7 +353,8 @@ class ThreeHopPipeline(BasePipeline):
                             query_idx: int, lamhat: List[float], graph_data: Any,
                             ground_truth_hops: Optional[List[Dict]], use_ground_truth: bool,
                             parent_map: Optional[Dict] = None,
-                            keep_path_scores: bool = True) -> Tuple[List[Dict], set]:
+                            keep_path_scores: bool = True,
+                            counts: Optional[List[List[int]]] = None) -> Tuple[List[Dict], set]:
         """Chunked hop processing with running MAX + optional GT filtering."""
         if not source_nodes:
             return [], set()
@@ -273,7 +369,12 @@ class ThreeHopPipeline(BasePipeline):
             
             batch_source = torch.tensor([[s] for s in chunk_nodes], dtype=torch.long, device=self.device)
             batch_rel = torch.tensor([[relation]] * len(chunk_nodes), dtype=torch.long, device=self.device)
-            batch_scores, _ = self.unified_predictor.predict(batch_source, batch_rel, graph_data, threshold=threshold)
+            batch_scores, _, neo4j_calls, ultra_calls = self.unified_predictor.predict(
+                batch_source, batch_rel, graph_data, threshold=threshold
+            )
+            if counts is not None and query_idx < len(counts):
+                counts[query_idx][0] += neo4j_calls
+                counts[query_idx][1] += ultra_calls
             
             for idx, source in enumerate(chunk_nodes):
                 scores = batch_scores[idx:idx+1]

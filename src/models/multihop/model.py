@@ -250,6 +250,11 @@ class MultiHopPredictor(nn.Module):
         min_neo4j = 0.5
         s_unified = self._unified_scores_from_raw(ultra_raw, prob, min_neo4j)
         
+        # Invocation counts: total 1-hop inferences in this batch (each (source, relation) = one Neo4j + one ULTRA when not skipped)
+        batch_size = query.shape[0]
+        neo4j_calls = batch_size
+        ultra_calls = 0 if skip_ultra else batch_size
+        
         # Keep scores on-device (GPU) to avoid sync/copies in hot loops.
         # Callers can move to CPU only for the small outputs they need.
-        return s_unified, min_neo4j
+        return s_unified, min_neo4j, neo4j_calls, ultra_calls

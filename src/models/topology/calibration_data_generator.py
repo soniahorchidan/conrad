@@ -150,7 +150,12 @@ class CalibrationDataGenerator:
                 query = query.unsqueeze(0)
             
             # Predict with GT restriction (use zero thresholds)
-            batch_pred_out = self.model._predict(query, zero_thresholds, graph_data, ans)
+            raw_pred = self.model._predict(query, zero_thresholds, graph_data, ans)
+            # Pipelines may return (batch_results, neo4j_per_query, ultra_per_query)
+            if isinstance(raw_pred, tuple) and len(raw_pred) == 3:
+                batch_pred_out = raw_pred[0]
+            else:
+                batch_pred_out = raw_pred
             
             for idx, pred_out in enumerate(batch_pred_out):
                 gt_labels = ans_list[idx] if idx < len(ans_list) else None

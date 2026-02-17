@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from argparse import Namespace
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from .base import BasePipeline
 
 
@@ -60,10 +60,50 @@ class TwoUnionPipeline(BasePipeline):
             predictions.append(list(union_nodes))
         
         return predictions
-    
+
+    @staticmethod
+    def apply_thresholds_to_scores_with_call_counts(
+        cal_scores: List[Dict[str, Any]], thresholds: List[float],
+        true_labels: Optional[List[Dict]] = None,
+        num_entities: int = 14541,
+    ) -> Tuple[List[List[int]], List[int], List[int]]:
+        """
+        Apply thresholds and return (predictions, neo4j_per_query, ultra_per_query).
+        Each 2u query runs 2 branches → 2 neo4j + 2 ultra per query.
+        """
+        predictions = TwoUnionPipeline.apply_thresholds_to_scores(
+            cal_scores, thresholds, true_labels, num_entities
+        )
+        n = len(predictions)
+        return predictions, [2] * n, [2] * n
+
+    @staticmethod
+    def apply_thresholds_to_scores_with_intermediate_sizes(
+        cal_scores: List[Dict[str, Any]], thresholds: List[float],
+        true_labels: Optional[List[Dict]] = None,
+        num_entities: int = 14541,
+    ) -> Tuple[List[List[int]], List[Tuple[int, int]]]:
+        """
+        Apply thresholds and return predictions plus intermediate set sizes per query.
+        Returns (predictions, list of (s1, s2) per query where s_i = size at branch i).
+        """
+        predictions = []
+        intermediate_sizes = []
+        for query_data in cal_scores:
+            branch1_scores = query_data['branch1']['scores']
+            branch2_scores = query_data['branch2']['scores']
+            branch1_passing = TwoUnionPipeline._extract_nodes_by_threshold(branch1_scores, thresholds[0])
+            branch2_passing = TwoUnionPipeline._extract_nodes_by_threshold(branch2_scores, thresholds[1])
+            s1 = len(branch1_passing)
+            s2 = len(branch2_passing)
+            union_nodes = branch1_passing | branch2_passing
+            predictions.append(list(union_nodes))
+            intermediate_sizes.append((s1, s2))
+        return predictions, intermediate_sizes
+
     @torch.no_grad()
     def predict_with_thresholds(self, query: torch.Tensor, lamhat: List[float], graph_data: Any,
-                               ground_truth: Optional[List[List[int]]] = None) -> List[List[int]]:
+                               ground_truth: Optional[List[List[int]]] = None) -> Tuple[List[List[int]], List[int], List[int]]:
         """
         Run 2u inference with threshold-based filtering.
         
@@ -74,18 +114,18 @@ class TwoUnionPipeline(BasePipeline):
             ground_truth: Optional list of GT entity lists (used during calibration for filtering)
             
         Returns:
-            List of predicted entity lists (union of both branches), one per query
+            (predictions, neo4j_calls_per_query, ultra_calls_per_query)
         """
-        batch_results = self._predict(query, lamhat, graph_data, ground_truth)
+        batch_results, neo4j_per_query, ultra_per_query = self._predict(query, lamhat, graph_data, ground_truth)
         
         # Extract final union nodes
         predictions = [result["union_nodes"] for result in batch_results]
         
-        return predictions
+        return predictions, neo4j_per_query, ultra_per_query
     
     @torch.no_grad()
     def _predict(self, query: torch.Tensor, lamhat: List[float], graph_data: Any,
-                ground_truth: Optional[List[List[int]]] = None) -> List[Dict[str, Any]]:
+                ground_truth: Optional[List[List[int]]] = None) -> Tuple[List[Dict[str, Any]], List[int], List[int]]:
         """
         Internal method that performs 2u prediction.
         
@@ -96,7 +136,7 @@ class TwoUnionPipeline(BasePipeline):
             ground_truth: Optional GT nodes for calibration filtering
             
         Returns:
-            List of result dictionaries with branch scores and union nodes
+            (batch_results, neo4j_calls_per_query, ultra_calls_per_query)
         """
         if query.dim() == 1:
             query = query.unsqueeze(0)
@@ -106,6 +146,8 @@ class TwoUnionPipeline(BasePipeline):
         
         batch_size = query.shape[0]
         batch_results = []
+        neo4j_per_query = [0] * batch_size
+        ultra_per_query = [0] * batch_size
         
         for i in range(batch_size):
             anchor1 = query_cpu[i, 0].item()
@@ -120,12 +162,16 @@ class TwoUnionPipeline(BasePipeline):
             # Branch 1: anchor1 -> rel1
             source1_tensor = torch.tensor([[anchor1]], dtype=torch.long, device=self.device)
             rel1_tensor = torch.tensor([[rel1]], dtype=torch.long, device=self.device)
-            scores1, _ = self.unified_predictor.predict(source1_tensor, rel1_tensor, graph_data, threshold=threshold1)
+            scores1, _, n1, u1 = self.unified_predictor.predict(source1_tensor, rel1_tensor, graph_data, threshold=threshold1)
+            neo4j_per_query[i] += n1
+            ultra_per_query[i] += u1
             
             # Branch 2: anchor2 -> rel2
             source2_tensor = torch.tensor([[anchor2]], dtype=torch.long, device=self.device)
             rel2_tensor = torch.tensor([[rel2]], dtype=torch.long, device=self.device)
-            scores2, _ = self.unified_predictor.predict(source2_tensor, rel2_tensor, graph_data, threshold=threshold2)
+            scores2, _, n2, u2 = self.unified_predictor.predict(source2_tensor, rel2_tensor, graph_data, threshold=threshold2)
+            neo4j_per_query[i] += n2
+            ultra_per_query[i] += u2
             
             nodes1 = self._extract_nodes_from_scores(scores1, threshold1)
             nodes2 = self._extract_nodes_from_scores(scores2, threshold2)
@@ -172,4 +218,4 @@ class TwoUnionPipeline(BasePipeline):
                 "union_nodes": union_nodes
             })
         
-        return batch_results
+        return batch_results, neo4j_per_query, ultra_per_query

@@ -226,13 +226,13 @@ else
         --generate-3p \
         --generate-2ip \
         --generate-2u \
-        --num-queries 4000 \
-        --num-2ip-queries 4000 \
-        --num-2u-queries 4000 \
+        --num-queries 5000 \
+        --num-2ip-queries 5000 \
+        --num-2u-queries 5000 \
         --size-ratio 1.0 \
         --max-hop-size 50 \
         --extract-intermediate \
-        --calib-split 0.5 \
+        --calib-split 0.8 \
         --test-path "${TEST_BASE_DIR}" \
         --calib-path "${CALIBRATION_BASE_DIR}"
 fi

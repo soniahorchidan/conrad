@@ -50,6 +50,8 @@ class QueryResult:
     ground_truth: List[int]
     execution_time_ms: float
     is_abstention: bool = False  # True if model abstained (empty prediction)
+    neo4j_calls: int = 0  # Total Neo4j (1-hop) invocations for this query
+    ultra_calls: int = 0  # Total ULTRA (neural) invocations for this query
 
 
 # TODO(Sonia): split this into multiple runners
@@ -208,7 +210,8 @@ class BaselineRunner:
         """Apply threshold to scores and return node indices."""
         return torch.nonzero(scores > threshold, as_tuple=True)[0].tolist()
     
-    def _create_abstention_result(self, gt: List, execution_time_ms: float) -> QueryResult:
+    def _create_abstention_result(self, gt: List, execution_time_ms: float,
+                                   neo4j_calls: int = 0, ultra_calls: int = 0) -> QueryResult:
         """Create a QueryResult for an abstention (empty prediction)."""
         gt_normalized = self._normalize_ground_truth(gt)
         return QueryResult(
@@ -218,7 +221,9 @@ class BaselineRunner:
             predicted_values=[],
             ground_truth=gt_normalized,
             execution_time_ms=execution_time_ms,
-            is_abstention=True
+            is_abstention=True,
+            neo4j_calls=neo4j_calls,
+            ultra_calls=ultra_calls
         )
     
     def _create_error_result(self, gt: List) -> QueryResult:
@@ -233,8 +238,8 @@ class BaselineRunner:
         return precision, recall, f1, fnr
     
     def _process_hop_batch(self, ultra_model, graph_data, nodes: List[int], 
-                          rel_type: int, threshold: float, batch_size: int) -> List[int]:
-        """Process a batch of nodes through a hop. Returns aggregated candidate nodes."""
+                          rel_type: int, threshold: float, batch_size: int) -> Tuple[List[int], int]:
+        """Process a batch of nodes through a hop. Returns (aggregated candidate nodes, num_ultra_calls)."""
         candidates_set = set()
         for batch_start in range(0, len(nodes), batch_size):
             batch_end = min(batch_start + batch_size, len(nodes))
@@ -248,8 +253,8 @@ class BaselineRunner:
             for j in range(len(batch_nodes)):
                 candidates = self._apply_threshold(scores[j], threshold)
                 candidates_set.update(candidates)
-        
-        return list(candidates_set)
+        # Total ULTRA 1-hop inferences = len(nodes)
+        return list(candidates_set), len(nodes)
     
     def _process_hop_batch_get_scores(self, ultra_model, graph_data, nodes: List[int], 
                                       rel_type: int, batch_size: int) -> Dict[int, torch.Tensor]:
@@ -336,7 +341,9 @@ class BaselineRunner:
                     predicted_values=pred_values,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(pred_values) == 0
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=1,
+                    ultra_calls=0
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -387,7 +394,9 @@ class BaselineRunner:
                     predicted_values=pred_values,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(pred_values) == 0
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=2,
+                    ultra_calls=0
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -455,7 +464,9 @@ class BaselineRunner:
                     predicted_values=pred_values,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(pred_values) == 0
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=3,
+                    ultra_calls=0
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1004,23 +1015,23 @@ class BaselineRunner:
                 hop1_nodes = self._apply_threshold(hop1_scores[0], static_threshold)
                 
                 if not hop1_nodes:
-                    results.append(self._create_abstention_result(gt, (time.time() - start_time) * 1000))
+                    results.append(self._create_abstention_result(gt, (time.time() - start_time) * 1000, ultra_calls=1))
                     continue
                 
                 # Hop 2
-                hop2_nodes = self._process_hop_batch(ultra_model, graph_data, hop1_nodes, 
+                hop2_nodes, hop2_calls = self._process_hop_batch(ultra_model, graph_data, hop1_nodes, 
                                                      rel_types[1], static_threshold, batch_size)
                 if not hop2_nodes:
-                    results.append(self._create_abstention_result(gt, (time.time() - start_time) * 1000))
+                    results.append(self._create_abstention_result(gt, (time.time() - start_time) * 1000, ultra_calls=1 + hop2_calls))
                     continue
                 
                 # Hop 3
-                hop3_nodes = self._process_hop_batch(ultra_model, graph_data, hop2_nodes, 
+                hop3_nodes, hop3_calls = self._process_hop_batch(ultra_model, graph_data, hop2_nodes, 
                                                      rel_types[2], static_threshold, batch_size)
                 
                 execution_time_ms = (time.time() - start_time) * 1000
                 precision, recall, f1, _ = self._compute_metrics_from_predictions(hop3_nodes, gt)
-                
+                ultra_calls = 1 + hop2_calls + hop3_calls
                 results.append(QueryResult(
                     precision=precision,
                     recall=recall,
@@ -1028,7 +1039,9 @@ class BaselineRunner:
                     predicted_values=hop3_nodes,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(hop3_nodes) == 0
+                    is_abstention=len(hop3_nodes) == 0,
+                    neo4j_calls=0,
+                    ultra_calls=ultra_calls
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1074,7 +1087,7 @@ class BaselineRunner:
                 
                 execution_time_ms = (time.time() - start_time) * 1000
                 precision, recall, f1, _ = self._compute_metrics_from_predictions(union_nodes, gt)
-                
+                # 2 branches = 2 ULTRA 1-hop inferences
                 results.append(QueryResult(
                     precision=precision,
                     recall=recall,
@@ -1082,7 +1095,9 @@ class BaselineRunner:
                     predicted_values=union_nodes,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(union_nodes) == 0
+                    is_abstention=len(union_nodes) == 0,
+                    neo4j_calls=0,
+                    ultra_calls=2
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1128,16 +1143,16 @@ class BaselineRunner:
                 intersection_nodes = list(set(branch1_nodes) & set(branch2_nodes))
                 
                 if not intersection_nodes:
-                    results.append(self._create_abstention_result(gt, (time.time() - start_time) * 1000))
+                    results.append(self._create_abstention_result(gt, (time.time() - start_time) * 1000, ultra_calls=2))
                     continue
                 
                 # Project from intersection
-                proj_nodes = self._process_hop_batch(ultra_model, graph_data, intersection_nodes, 
+                proj_nodes, proj_calls = self._process_hop_batch(ultra_model, graph_data, intersection_nodes, 
                                                      rel3, static_threshold, batch_size)
                 
                 execution_time_ms = (time.time() - start_time) * 1000
                 precision, recall, f1, _ = self._compute_metrics_from_predictions(proj_nodes, gt)
-                
+                ultra_calls = 2 + proj_calls  # 2 branches + projection
                 results.append(QueryResult(
                     precision=precision,
                     recall=recall,
@@ -1145,7 +1160,9 @@ class BaselineRunner:
                     predicted_values=proj_nodes,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(proj_nodes) == 0
+                    is_abstention=len(proj_nodes) == 0,
+                    neo4j_calls=0,
+                    ultra_calls=ultra_calls
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1236,14 +1253,16 @@ class BaselineRunner:
                 
                 start_time = time.time()
                 # Use pipeline's predict_with_thresholds method
-                predictions = pipeline_model.predict_with_thresholds(
+                result = pipeline_model.predict_with_thresholds(
                     query_tensor, lamhat, graph_data
                 )
+                predictions, neo4j_per_query, ultra_per_query = result[0], result[1], result[2]
                 execution_time_ms = (time.time() - start_time) * 1000
                 
                 pred_values = predictions[0] if predictions else []
                 precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
-                
+                neo4j_calls = neo4j_per_query[0] if neo4j_per_query else 0
+                ultra_calls = ultra_per_query[0] if ultra_per_query else 0
                 results.append(QueryResult(
                     precision=precision,
                     recall=recall,
@@ -1251,7 +1270,9 @@ class BaselineRunner:
                     predicted_values=pred_values,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(pred_values) == 0
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=neo4j_calls,
+                    ultra_calls=ultra_calls
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1287,14 +1308,16 @@ class BaselineRunner:
                 
                 start_time = time.time()
                 # Use pipeline's predict_with_thresholds method
-                predictions = pipeline_model.predict_with_thresholds(
+                result = pipeline_model.predict_with_thresholds(
                     query_tensor, lamhat, graph_data
                 )
+                predictions, neo4j_per_query, ultra_per_query = result[0], result[1], result[2]
                 execution_time_ms = (time.time() - start_time) * 1000
                 
                 pred_values = predictions[0] if predictions else []
                 precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
-                
+                neo4j_calls = neo4j_per_query[0] if neo4j_per_query else 0
+                ultra_calls = ultra_per_query[0] if ultra_per_query else 0
                 results.append(QueryResult(
                     precision=precision,
                     recall=recall,
@@ -1302,7 +1325,9 @@ class BaselineRunner:
                     predicted_values=pred_values,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(pred_values) == 0
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=neo4j_calls,
+                    ultra_calls=ultra_calls
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1338,14 +1363,16 @@ class BaselineRunner:
                 
                 start_time = time.time()
                 # Use pipeline's predict_with_thresholds method
-                predictions = pipeline_model.predict_with_thresholds(
+                result = pipeline_model.predict_with_thresholds(
                     query_tensor, lamhat, graph_data
                 )
+                predictions, neo4j_per_query, ultra_per_query = result[0], result[1], result[2]
                 execution_time_ms = (time.time() - start_time) * 1000
                 
                 pred_values = predictions[0] if predictions else []
                 precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
-                
+                neo4j_calls = neo4j_per_query[0] if neo4j_per_query else 0
+                ultra_calls = ultra_per_query[0] if ultra_per_query else 0
                 results.append(QueryResult(
                     precision=precision,
                     recall=recall,
@@ -1353,7 +1380,9 @@ class BaselineRunner:
                     predicted_values=pred_values,
                     ground_truth=self._normalize_ground_truth(gt),
                     execution_time_ms=execution_time_ms,
-                    is_abstention=len(pred_values) == 0
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=neo4j_calls,
+                    ultra_calls=ultra_calls
                 ))
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
@@ -1371,7 +1400,9 @@ class BaselineRunner:
                f"{stats['precision']:.4f},{stats['recall']:.4f},{stats['f1']:.4f},"
                f"{stats['avg_time_ms']:.2f},{stats['num_queries']},{stats['num_abstentions']},"
                f"{stats['abstention_rate']:.4f},{stats['precision_excl_abstentions']:.4f},"
-               f"{stats['recall_excl_abstentions']:.4f},{stats['f1_excl_abstentions']:.4f}\n")
+               f"{stats['recall_excl_abstentions']:.4f},{stats['f1_excl_abstentions']:.4f},"
+               f"{stats.get('avg_neo4j_calls', 0):.2f},{stats.get('avg_ultra_calls', 0):.2f},"
+               f"{stats.get('total_neo4j_calls', 0)},{stats.get('total_ultra_calls', 0)}\n")
     
     def _serialize_result(self, result: QueryResult) -> Dict:
         """Serialize a single QueryResult to dict."""
@@ -1382,7 +1413,9 @@ class BaselineRunner:
             'execution_time_ms': result.execution_time_ms,
             'num_predicted': len(result.predicted_values),
             'num_ground_truth': len(result.ground_truth),
-            'is_abstention': result.is_abstention
+            'is_abstention': result.is_abstention,
+            'neo4j_calls': result.neo4j_calls,
+            'ultra_calls': result.ultra_calls
         }
     
     def _print_stats(self, name: str, stats: Dict[str, float]):
@@ -1393,6 +1426,8 @@ class BaselineRunner:
         self.logger.info(f"  F1:        {stats['f1']:.4f}")
         self.logger.info(f"  Avg Time:  {stats['avg_time_ms']:.2f} ms")
         self.logger.info(f"  Queries:   {stats['num_queries']}")
+        self.logger.info(f"  Neo4j calls: total {stats.get('total_neo4j_calls', 0)}, avg {stats.get('avg_neo4j_calls', 0):.2f}/query")
+        self.logger.info(f"  ULTRA calls: total {stats.get('total_ultra_calls', 0)}, avg {stats.get('avg_ultra_calls', 0):.2f}/query")
         if stats.get('num_excluded', 0) > 0:
             self.logger.info(f"  Excluded (empty GT): {stats['num_excluded']}")
         if stats.get('num_abstentions', 0) > 0:
@@ -1649,6 +1684,8 @@ class BaselineRunner:
             'num_queries': 0, 'num_excluded': 0, 'num_abstentions': 0,
             'abstention_rate': 0.0, 'precision_excl_abstentions': 0.0,
             'recall_excl_abstentions': 0.0, 'f1_excl_abstentions': 0.0,
+            'total_neo4j_calls': 0, 'total_ultra_calls': 0,
+            'avg_neo4j_calls': 0.0, 'avg_ultra_calls': 0.0,
         }
         
         if not results:
@@ -1672,18 +1709,25 @@ class BaselineRunner:
         else:
             precision_excl = recall_excl = f1_excl = 0.0
         
+        total_neo4j = sum(r.neo4j_calls for r in valid_results)
+        total_ultra = sum(r.ultra_calls for r in valid_results)
+        nq = len(valid_results)
         return {
             'precision': np.mean([r.precision for r in valid_results]),
             'recall': np.mean([r.recall for r in valid_results]),
             'f1': np.mean([r.f1 for r in valid_results]),
             'avg_time_ms': np.mean([r.execution_time_ms for r in valid_results]),
-            'num_queries': len(valid_results),
+            'num_queries': nq,
             'num_excluded': num_excluded,
             'num_abstentions': num_abstentions,
             'abstention_rate': abstention_rate,
             'precision_excl_abstentions': precision_excl,
             'recall_excl_abstentions': recall_excl,
             'f1_excl_abstentions': f1_excl,
+            'total_neo4j_calls': total_neo4j,
+            'total_ultra_calls': total_ultra,
+            'avg_neo4j_calls': total_neo4j / nq if nq else 0.0,
+            'avg_ultra_calls': total_ultra / nq if nq else 0.0,
         }
     
     def save_results(self, output_dir: str, skip_neo4j: bool = False, json_suffix: str = None):
@@ -1705,7 +1749,7 @@ class BaselineRunner:
         with open(baseline_summary_path, mode) as f:
             # Write header only if file doesn't exist
             if not file_exists:
-                f.write("baseline,threshold,precision,recall,f1,avg_time_ms,num_queries,num_abstentions,abstention_rate,precision_excl_abstentions,recall_excl_abstentions,f1_excl_abstentions\n")
+                f.write("baseline,threshold,precision,recall,f1,avg_time_ms,num_queries,num_abstentions,abstention_rate,precision_excl_abstentions,recall_excl_abstentions,f1_excl_abstentions,avg_neo4j_calls,avg_ultra_calls,total_neo4j_calls,total_ultra_calls\n")
             
             # Save neo4j results if they exist (regardless of skip_neo4j flag)
             if self._has_neo4j_results():
