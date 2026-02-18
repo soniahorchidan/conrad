@@ -3,10 +3,14 @@
 set -euo pipefail
 
 # Configuration
-INCOMPLETENESS_LEVELS=(20 5 40)
+# INCOMPLETENESS_LEVELS=(20 5 40)
+INCOMPLETENESS_LEVELS=(40)
 DATASETS=("fb15k-237" "nell-955" "yago310")
+# Vector CRC
 MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
-BASELINE_TYPES=("neural" "symbolic" "hybrid")
+# Non Vector CRC
+# MODELS=("NonVector3HopNeural")
+# BASELINE_TYPES=("neural" "symbolic" "hybrid") # unused
 
 # Threshold configurations
 NEURAL_THRESHOLDS=(0.7 0.8 0.9 0.99)
@@ -16,11 +20,16 @@ HYBRID_THRESHOLDS=(0.45 0.5 0.6 0.7)
 CONFIDENCE_LEVELS=(0.5 0.6 0.7 0.8 0.9)
 MAX_EVAL_QUERIES=2000
 
+# Neo4j Instance
+# NEO4J_HOST=localhost
+# NEO4J_BOLT_PORT=7688
+
 # Model-specific calibration batch sizes (increased for better GPU utilization)
 declare -A CALIB_BATCH_SIZES=(
     ["ThreeHopPipeline"]=64
     ["TwoUnionPipeline"]=64
     ["TwoIntersectProjectPipeline"]=64
+    ["NonVector3HopNeural"]=64
 )
 
 # Model to query type mapping
@@ -28,6 +37,7 @@ declare -A MODEL_TO_QUERY_TYPE=(
     ["ThreeHopPipeline"]="3p_pipeline"
     ["TwoUnionPipeline"]="2u_pipeline"
     ["TwoIntersectProjectPipeline"]="2ip_pipeline"
+    ["NonVector3HopNeural"]="3p_pipeline"
 )
 
 # Get script directory and repo root
@@ -36,6 +46,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 GENERATE_CALIBRATION_SCRIPT="${REPO_ROOT}/scripts/generate_calibration.sh"
 CACHE_DIR="${REPO_ROOT}/artifacts/snapshots/ultraquery/vector_crc_cache"
 BASELINE_SCRIPT="${SCRIPT_DIR}/run_baseline_benchmarks.py"
+
+# Vector CRC
+CRC_SCRIPT="${SCRIPT_DIR}/run_crc_benchmark_auto.py"
+# Non Vector CRC
+# CRC_SCRIPT="${SCRIPT_DIR}/run_crc_non_vector_auto.py"
 
 # Optional: Set load path for neural/hybrid baselines (auto-detected if not set)
 # You can set this to a specific model path, or leave empty for auto-detection
@@ -78,7 +93,7 @@ for dataset in "${DATASETS[@]}"; do
         # Must run from REPO_ROOT so build.sh (invoked by generate_calibration.sh) finds ./artifacts/data/
         cd "${REPO_ROOT}"
         log INFO "Generating calibration data for ${dataset} with ${incompleteness}% incompleteness"
-        if ! bash "${GENERATE_CALIBRATION_SCRIPT}" --dataset "${dataset}" --delete-edges-perc "${incompleteness}"; then
+        if ! bash "${GENERATE_CALIBRATION_SCRIPT}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}" --dataset "${dataset}" --delete-edges-perc "${incompleteness}"; then
             log ERROR "Failed to generate calibration data for ${dataset} with ${incompleteness}% incompleteness"
             exit 1
         fi
@@ -91,26 +106,28 @@ for dataset in "${DATASETS[@]}"; do
             log INFO "Starting ${model} benchmark (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
             log INFO "Using calib_batch_size: ${calib_batch_size}"
             
-            # cd "${SCRIPT_DIR}"
-            # if ! python -u run_crc_benchmark_auto.py \
-            #     --confidence-levels "${CONFIDENCE_LEVELS[@]}" \
-            #     --max-eval-queries "${max_eval_queries}" \
-            #     --model_to_infer "${model}" \
-            #     --calib_batch_size "${calib_batch_size}" \
-            #     --inference-batch-size 1 \
-            #     --dataset "${dataset}" \
-            #     --incompleteness "${incompleteness}"  \
-            #     --use-ultraquery; then
-            #     log ERROR "Benchmark failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
-            #     exit 1
-            # fi
+            cd "${SCRIPT_DIR}"
+            if ! python -u "${CRC_SCRIPT}" \
+                --neo4j-host "${NEO4J_HOST}" \
+                --neo4j-bolt-port "${NEO4J_BOLT_PORT}" \
+                --confidence-levels "${CONFIDENCE_LEVELS[@]}" \
+                --max-eval-queries "${max_eval_queries}" \
+                --model_to_infer "${model}" \
+                --calib_batch_size "${calib_batch_size}" \
+                --inference-batch-size 1 \
+                --dataset "${dataset}" \
+                --incompleteness "${incompleteness}"  \
+                --use-ultraquery; then
+                log ERROR "Benchmark failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+                exit 1
+            fi
             
-            # log INFO "${model} benchmark completed (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+            log INFO "${model} benchmark completed (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
             
-            # # Delete cache after each run
-            # log INFO "Clearing cache: ${CACHE_DIR}"
-            # rm -rf "${CACHE_DIR}"/*
-            # log INFO "Cache cleared"
+            # Delete cache after each run
+            log INFO "Clearing cache: ${CACHE_DIR}"
+            rm -rf "${CACHE_DIR}"/*
+            log INFO "Cache cleared"
             
             # Run baseline benchmarks for this model
             query_type="${MODEL_TO_QUERY_TYPE[$model]}"
@@ -134,6 +151,8 @@ for dataset in "${DATASETS[@]}"; do
                 log INFO "Output directory: ${symbolic_output_dir}"
                 symbolic_cmd=(
                     python -u "${BASELINE_SCRIPT}"
+                    --neo4j-host "${NEO4J_HOST}"
+                    --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
                     --query-dir "${query_dir}"
                     --dataset "${dataset}"
                     --incompleteness "${incompleteness}"
@@ -152,6 +171,8 @@ for dataset in "${DATASETS[@]}"; do
                 log INFO "Output directory: ${neural_output_dir}"
                 neural_cmd=(
                     python -u "${BASELINE_SCRIPT}"
+                    --neo4j-host "${NEO4J_HOST}"
+                    --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
                     --query-dir "${query_dir}"
                     --dataset "${dataset}"
                     --incompleteness "${incompleteness}"
@@ -192,6 +213,8 @@ for dataset in "${DATASETS[@]}"; do
                     
                     hybrid_cmd=(
                         python -u "${BASELINE_SCRIPT}"
+                        --neo4j-host "${NEO4J_HOST}"
+                        --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
                         --query-dir "${query_dir}"
                         --dataset "${dataset}"
                         --incompleteness "${incompleteness}"

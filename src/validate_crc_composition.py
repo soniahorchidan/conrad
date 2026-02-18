@@ -50,6 +50,7 @@ class BenchmarkConfig:
         "threehoppipeline": "3p_pipeline",
         "twounionpipeline": "2u_pipeline",
         "twointersectprojectpipeline": "2ip_pipeline",
+        "nonvector3hopneural": "3p_pipeline"
     }
     
     def load_lambdas_from_file(self) -> Dict[float, np.ndarray]:
@@ -347,13 +348,13 @@ class CRCBenchmarkValidator:
             start_idx = self.config.query_start_index
             end_idx = start_idx + self.config.max_queries_per_file
             
-            for i, query in enumerate(queries[start_idx:end_idx]):
+            for i, query in enumerate(tqdm(queries[start_idx:end_idx], position=0, leave=True, ncols=80)):
                 query = query.strip()
                 if not query:
                     continue
                 
-                print(f"Running query {i+1}/{self.config.max_queries_per_file} from {query_file}")
-                print(f"Query: {query}")
+                # print(f"Running query {i+1}/{self.config.max_queries_per_file} from {query_file}")
+                # print(f"Query: {query}")
                 
                 gt = gt_values[i] if i < len(gt_values) else []
 
@@ -361,7 +362,7 @@ class CRCBenchmarkValidator:
                 
                 if result:
                     self.all_results[query_type][query_file].append(result)
-                    print(f"Query {i+1} - Precision: {result.precision:.4f}, Recall: {result.recall:.4f}, F1: {result.f1:.4f} | pred: {len(result.predicted_values)}, GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms")
+                    # print(f"Query {i+1} - Precision: {result.precision:.4f}, Recall: {result.recall:.4f}, F1: {result.f1:.4f} | pred: {len(result.predicted_values)}, GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms")
         
         total_time_seconds = time.time() - start_time
         total_time_ms = total_time_seconds * 1000
