@@ -4,12 +4,13 @@ set -euo pipefail
 
 # Configuration
 # INCOMPLETENESS_LEVELS=(20 5 40)
-INCOMPLETENESS_LEVELS=(40)
-DATASETS=("fb15k-237" "nell-955" "yago310")
+INCOMPLETENESS_LEVELS=(20)
+# DATASETS=("fb15k-237" "nell-955" "yago310")
+DATASETS=("fb15k-237")
 # Vector CRC
-MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
+# MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
 # Non Vector CRC
-# MODELS=("NonVector3HopNeural")
+MODELS=("NonVector3HopNeural")
 # BASELINE_TYPES=("neural" "symbolic" "hybrid") # unused
 
 # Threshold configurations
@@ -18,11 +19,11 @@ HYBRID_THRESHOLDS=(0.45 0.5 0.6 0.7)
 
 # Benchmark evaluation configuration
 CONFIDENCE_LEVELS=(0.5 0.6 0.7 0.8 0.9)
-MAX_EVAL_QUERIES=2000
+MAX_EVAL_QUERIES=1000
 
 # Neo4j Instance
-# NEO4J_HOST=localhost
-# NEO4J_BOLT_PORT=7688
+NEO4J_HOST=localhost
+NEO4J_BOLT_PORT=7688
 
 # Model-specific calibration batch sizes (increased for better GPU utilization)
 declare -A CALIB_BATCH_SIZES=(
@@ -48,9 +49,9 @@ CACHE_DIR="${REPO_ROOT}/artifacts/snapshots/ultraquery/vector_crc_cache"
 BASELINE_SCRIPT="${SCRIPT_DIR}/run_baseline_benchmarks.py"
 
 # Vector CRC
-CRC_SCRIPT="${SCRIPT_DIR}/run_crc_benchmark_auto.py"
+# CRC_SCRIPT="${SCRIPT_DIR}/run_crc_benchmark_auto.py"
 # Non Vector CRC
-# CRC_SCRIPT="${SCRIPT_DIR}/run_crc_non_vector_auto.py"
+CRC_SCRIPT="${SCRIPT_DIR}/run_crc_non_vector_auto.py"
 
 # Optional: Set load path for neural/hybrid baselines (auto-detected if not set)
 # You can set this to a specific model path, or leave empty for auto-detection
@@ -138,8 +139,10 @@ for dataset in "${DATASETS[@]}"; do
             log INFO "Query directory: ${query_dir}"
             
             # Check if query directory exists
-            if [ ! -d "${query_dir}" ]; then
-                log WARN "Query directory not found: ${query_dir}, skipping baselines"
+            # if [ ! -d "${query_dir}" ]; then
+            #     log WARN "Query directory not found: ${query_dir}, skipping baselines"
+            if false; then 
+                log WARN "baselines disabled"
             else
                 # Define explicit output directories for each baseline type to ensure separation
                 symbolic_output_dir="${REPO_ROOT}/artifacts/benchmark/symbolic_bench_${dataset}_${model}_${incompleteness}"

@@ -250,7 +250,7 @@ else
 fi
 
 log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
-python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"
+python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
 
 log INFO "Calibration generation pipeline completed successfully"
 log INFO "Generated calibration and test queries:"

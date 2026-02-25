@@ -94,6 +94,7 @@ class ModelFactory:
 
 
         # Initialize Neo4j database controller
+        logging.info(f"Init neo4j backend at: neo4j://{self.inf_args.neo4j_host}:{self.inf_args.neo4j_bolt_port}")
         self.model_args.db_controller = Neo4JBackendDBController(
             f"neo4j://{self.inf_args.neo4j_host}:{self.inf_args.neo4j_bolt_port}",
             self.inf_args.node_unique_id,

@@ -22,7 +22,7 @@ class NonVectorCRC(object):
         # The whole cache process is a little improvised. The cache is cleared from 'run_crc_non_vector_auto.py'
         self.cache_dir = f"../artifacts/non_vector_crc_cache"
         self.is_calibrated = False
-        self.cache_version = "v2"
+        self.cache_version = "v3"
 
         self.calibration_results = self._load_or_initialize_cache()
     
@@ -54,7 +54,7 @@ class NonVectorCRC(object):
             "model_name": self.model_name,
             "time_stamp": datetime.now().isoformat(),
             "alphas": self.alphas.tolist(),
-            "bonferroni_alphas": [],
+            "union_bound_alphas": [],
             "calibrated_alphas": {}
         }
     
@@ -96,10 +96,11 @@ class NonVectorCRC(object):
         logging.info("Starting CRC optimization...")
         for alpha in self.alphas:
             # alpha levels are updated for a 3 hop union bound
-            alpha_three_hop = self.bonferroni_inequality_3_hops(alpha)
+            # alpha_three_hop = self.bonferroni_inequality_3_hops(alpha)
+            alpha_three_hop = self.equally_devided_alpha_3_hops(alpha)
             # classic 1 hop CRC optimization on the updated alpha levels
             lamhat = self.optimize(alpha=alpha_three_hop, cal_scores=cal_scores, true_labels=true_labels)
-            self.calibration_results["bonferroni_alphas"].append(alpha_three_hop)
+            self.calibration_results["union_bound_alphas"].append(alpha_three_hop)
             self.calibration_results["calibrated_alphas"][alpha] = lamhat
         
         self.is_calibrated = True
@@ -125,6 +126,14 @@ class NonVectorCRC(object):
         confidence = round(1 - alpha, 4)
         union_bound_confidence = np.cbrt(confidence) # cube root
         return round(1 - union_bound_confidence, 4)
+
+    def equally_devided_alpha_3_hops(self, alpha):
+        """
+        Union bound on confidence over three hops means we need to allow a third
+        of the total error on each individual hop.
+        Note: really this is model/pipeline specific and should live elsewhere.
+        """
+        return alpha/3
     
     def lamhat_threshold(self, lam, cal_scores, y, alpha):
         n = len(cal_scores)

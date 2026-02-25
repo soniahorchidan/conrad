@@ -65,7 +65,7 @@ class NonVector3HopNeural(nn.Module):
         # ULTRA.forward may return (scores, intermediate); ensure tensor
         if isinstance(scores, tuple) or isinstance(scores, list):
             scores = scores[0]
-
+        scores = torch.sigmoid(scores)
         return scores
 
     def predict(self, query: torch.Tensor, confidence: float, graph_data: Any) -> Optional[List]:
@@ -127,6 +127,7 @@ class NonVector3HopNeural(nn.Module):
                     hop_scores = self.ultra.forward(graph_data_dev, hop_queries)
                     if isinstance(hop_scores, tuple) or isinstance(hop_scores, list):
                         hop_scores = hop_scores[0]
+                    hop_scores = torch.sigmoid(hop_scores)
 
                     # Ensure shape [N_chunk, V]
                     if hop_scores.dim() == 1:
@@ -201,7 +202,7 @@ class NonVector3HopNeural(nn.Module):
         all_labels = []
         all_queries = []
 
-        for batch in tqdm(calib_iterator, ncols=80):
+        for batch in tqdm(calib_iterator):
             # batch: (queries, answers_by_hop, graph_data, interm_hop_data)
             queries_batch, answers_batch, graph_data_batch, _ = batch
 
@@ -209,6 +210,7 @@ class NonVector3HopNeural(nn.Module):
                 queries_batch = queries_batch.unsqueeze(0)
 
             scores_batch = self.score_hop(queries_batch, graph_data_batch)  # [B, V]
+            # print("scores", scores_batch)
 
             for i in range(scores_batch.shape[0]):
                 scores_row = scores_batch[i].cpu()

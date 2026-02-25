@@ -256,6 +256,7 @@ def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_qu
     
     # Initialize database controller
     neo4j_uri = f"bolt://${neo4j_host}:${neo4j_bolt_port}"
+    logging.info(f"Connecting to Neo4j at: {neo4j_uri}")
     db_controller = Neo4JBackendDBController(
         uri=neo4j_uri,
         nodeUID="id",
