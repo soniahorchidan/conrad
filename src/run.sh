@@ -3,10 +3,8 @@
 set -euo pipefail
 
 # Configuration
-# INCOMPLETENESS_LEVELS=(20 5 40)
-INCOMPLETENESS_LEVELS=(20)
-# DATASETS=("fb15k-237" "nell-955" "yago310")
-DATASETS=("fb15k-237")
+INCOMPLETENESS_LEVELS=(20 5 40)
+DATASETS=("fb15k-237" "nell-955" "yago310")
 # Vector CRC
 # MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
 # Non Vector CRC
@@ -139,10 +137,8 @@ for dataset in "${DATASETS[@]}"; do
             log INFO "Query directory: ${query_dir}"
             
             # Check if query directory exists
-            # if [ ! -d "${query_dir}" ]; then
-            #     log WARN "Query directory not found: ${query_dir}, skipping baselines"
-            if false; then 
-                log WARN "baselines disabled"
+            if [ ! -d "${query_dir}" ]; then
+                log WARN "Query directory not found: ${query_dir}, skipping baselines"
             else
                 # Define explicit output directories for each baseline type to ensure separation
                 symbolic_output_dir="${REPO_ROOT}/artifacts/benchmark/symbolic_bench_${dataset}_${model}_${incompleteness}"
