@@ -209,7 +209,7 @@ def split_and_save_queries(
         logging.info(f"  Calibration data saved to: {calib_path}")
 
 
-def sample_calibration_data(num_queries_per_hop=1000, size_ratio=0.1, min_hops=3, max_hops=3, extract_intermediate=True, max_hop_size=50, generate_3hop=True, generate_2ip=False, generate_2u=False, num_2ip_queries=1000, num_2u_queries=1000, calib_path="./calibration_data", calib_split=None, test_path=None):
+def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_queries_per_hop=1000, size_ratio=0.1, min_hops=3, max_hops=3, extract_intermediate=True, max_hop_size=50, generate_3hop=True, generate_2ip=False, generate_2u=False, num_2ip_queries=1000, num_2u_queries=1000, calib_path="./calibration_data", calib_split=None, test_path=None):
     """
     Sample calibration data from the database and save to disk.
     
@@ -255,7 +255,8 @@ def sample_calibration_data(num_queries_per_hop=1000, size_ratio=0.1, min_hops=3
     device = "cpu"  # or "cuda" if available
     
     # Initialize database controller
-    neo4j_uri = f"bolt://localhost:7687"
+    neo4j_uri = f"bolt://${neo4j_host}:${neo4j_bolt_port}"
+    logging.info(f"Connecting to Neo4j at: {neo4j_uri}")
     db_controller = Neo4JBackendDBController(
         uri=neo4j_uri,
         nodeUID="id",
@@ -525,6 +526,10 @@ def sample_calibration_data(num_queries_per_hop=1000, size_ratio=0.1, min_hops=3
 def main():
     """Main function to run the calibration sampling."""
     parser = ArgumentParser(description='Sample calibration data from Neo4j database')
+    parser.add_argument("--neo4j-host", type=str, default="localhost",
+                       help="Neo4j host (default: localhost)")
+    parser.add_argument("--neo4j-bolt-port", type=int, default=7687,
+                       help="Neo4j bolt port (default: 7687)")
     parser.add_argument('--num-queries', type=int, default=1000,
                         help='Number of queries to generate per hop count (default: 1000, min:100)')
     parser.add_argument('--size-ratio', type=float, default=0.1,
@@ -582,6 +587,8 @@ def main():
     
     try:
         calibration_data_path = sample_calibration_data(
+            neo4j_host=args.neo4j_host,
+            neo4j_bolt_port=args.neo4j_bolt_port,
             num_queries_per_hop=args.num_queries,
             size_ratio=args.size_ratio,
             min_hops=args.min_hops,

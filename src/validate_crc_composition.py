@@ -50,6 +50,7 @@ class BenchmarkConfig:
         "threehoppipeline": "3p_pipeline",
         "twounionpipeline": "2u_pipeline",
         "twointersectprojectpipeline": "2ip_pipeline",
+        "nonvector3hopneural": "3p_pipeline"
     }
     
     def load_lambdas_from_file(self) -> Dict[float, np.ndarray]:
@@ -358,15 +359,17 @@ class CRCBenchmarkValidator:
             start_idx = self.config.query_start_index
             end_idx = start_idx + self.config.max_queries_per_file
             
-            for i, query in enumerate(queries[start_idx:end_idx]):
+            for i, query in enumerate(tqdm(queries[start_idx:end_idx], position=0, leave=True, ncols=80)):
                 query = query.strip()
                 if not query:
                     continue
                 
-                print(f"Running query {i+1}/{self.config.max_queries_per_file} from {query_file}")
-                print(f"Query: {query}")
                 
                 gt = gt_values[i] if i < len(gt_values) else []
+
+                # print(f"Running query {i+1}/{self.config.max_queries_per_file} from {query_file}")
+                # print(f"Query: {query}")
+                # print(f"GT: {gt}")
 
                 result = self.process_single_query(query, model, graph_data, gt, override_confidence=self.config.confidence)
                 
@@ -772,6 +775,12 @@ def main():
         "--load-path", type=str, default=None,
         help="Override load_path to use a specific checkpoint file or directory (e.g., path to ultraquery.pth)"
     )
+    parser_validate_crc.add_argument(
+        "--neo4j-host", type=str, default="localhost",
+        help="Neo4j host (default: localhost)")
+    parser_validate_crc.add_argument(
+        "--neo4j-bolt-port", type=int, default=7687,
+        help="Neo4j bolt port (default: 7687)")
     args_validate_crc, remaining_args = parser_validate_crc.parse_known_args()
     
     # Validate dataset is provided
@@ -792,7 +801,11 @@ def main():
         level=logging.INFO,
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    
+
+    # Manually add Neo4j arguments
+    inf_args.neo4j_host = args_validate_crc.neo4j_host
+    inf_args.neo4j_bolt_port = args_validate_crc.neo4j_bolt_port
+
     # Update load_path based on dataset to use dataset-specific model
     # Priority: 1) --load-path override, 2) --use-ultraquery flag, 3) dataset-specific model
     if args_validate_crc.load_path:
@@ -878,6 +891,7 @@ def main():
     logging.info(f"Dataset statistics - Entities: {inf_args.num_entities}, Relations: {inf_args.num_relations}")
     
     # Setup model and calibration
+    logging.info(f"inf args before starting processing: {inf_args}")
     model_factory_pipeline, db_controller = validator.setup_model_and_calibration(inf_args)
     
     # Run benchmark queries

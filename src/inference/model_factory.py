@@ -8,7 +8,7 @@ from models import (
     ultra_parse_args,
     ModelUtils,
 )
-from conformal_prediction import conformal_prediction_parse_args, VectorConformalRiskControl
+from conformal_prediction import conformal_prediction_parse_args, VectorConformalRiskControl, NonVectorCRC
 from utils import args2sequence
 import logging
 
@@ -18,7 +18,7 @@ class ModelFactory:
         self.model_to_infer = inf_args.model_to_infer
         self.inf_args = inf_args
         # Extract model-specific arguments from model arguments
-        if self.model_to_infer.lower() in ["ultra", "dbexecmodel", "multihoppredictor", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
+        if self.model_to_infer.lower() in ["ultra", "dbexecmodel", "multihoppredictor", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline", "nonvector3hopneural"]:
             self.model_parser = ultra_parse_args
             # mps not supported for ULTRA
             if inf_args.device == "mps":
@@ -54,7 +54,7 @@ class ModelFactory:
                 logging.info("Underlying ULTRA model set to eval mode")
 
     def load_model(self):
-        if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
+        if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline", "nonvector3hopneural"]:
             # Check for ultra_args.json first (standard checkpoint structure)
             if self.model_to_infer.lower() == "multihoppredictor":
                 model_args_dict_path = os.path.join(
@@ -94,6 +94,7 @@ class ModelFactory:
 
 
         # Initialize Neo4j database controller
+        logging.info(f"Init neo4j backend at: neo4j://{self.inf_args.neo4j_host}:{self.inf_args.neo4j_bolt_port}")
         self.model_args.db_controller = Neo4JBackendDBController(
             f"neo4j://{self.inf_args.neo4j_host}:{self.inf_args.neo4j_bolt_port}",
             self.inf_args.node_unique_id,
@@ -141,7 +142,22 @@ class ModelFactory:
             model: ModelUtils = getattr(models, pipeline_model_name)(
                 model_factory_ultra.model, model_factory_dbexec.model, self.inf_args, self.inf_args.device
             )
-        
+        elif self.model_to_infer.lower() in ["nonvector3hopneural"]:
+            # Load ULTRA model (once)
+            inf_args_ultra = Namespace(**vars(self.inf_args))
+            inf_args_ultra.model_to_infer = "ULTRA"
+            model_factory_ultra = ModelFactory(inf_args_ultra)
+            model_factory_ultra.prepare_model()
+            
+            # Setup multi-GPU for ULTRA model
+            if hasattr(model_factory_ultra.model, 'setup_multi_gpu'):
+                model_factory_ultra.model.setup_multi_gpu()
+                num_gpus_used = model_factory_ultra.model.num_gpus
+                logging.info(f"ULTRA inference configured: Using {num_gpus_used} GPU(s)")
+            
+            model: ModelUtils = getattr(models, self.inf_args.model_to_infer)(
+                model_factory_ultra.model, self.model_args, self.inf_args.device
+            )
         else:    
             # Initialize model
             model: ModelUtils = getattr(models, self.inf_args.model_to_infer)(
@@ -169,6 +185,16 @@ class ModelFactory:
                     self.inf_args.model_to_infer.lower(),
                     self.inf_args.device,
                     model,  # Pass the actual model instance
+                )
+            elif self.model_to_infer.lower() in ["nonvector3hopneural"]:
+                crc_args = conformal_prediction_parse_args({})
+                crc_args.load_path = self.inf_args.load_path
+
+                # Pass dataset for dataset-aware caching
+                crc_args.dataset = getattr(self.inf_args, 'dataset', None)
+                
+                model.conformal_prediction = NonVectorCRC(
+                    args=crc_args, generateCalibrateSamples_fn=model.generateCalibrateSamples, model_name=self.inf_args.model_to_infer.lower(), device=self.inf_args.device
                 )
             else:
                 logging.info(f"Conformal prediction not supported for model {self.model_to_infer}. "

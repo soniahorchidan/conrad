@@ -17,12 +17,22 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_SCRIPT="${REPO_ROOT}/build.sh"
 
 # Parse command line arguments
+NEO4J_HOST="localhost"
+NEO4J_BOLT_PORT="7687"
 DATASET=""
 DELETE_EDGES_PERC=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --neo4j-host)
+            NEO4J_HOST="$2"
+            shift 2
+            ;;
+        --neo4j-bolt-port)
+            NEO4J_BOLT_PORT="$2"
+            shift 2
+            ;;
         --dataset)
             DATASET="$2"
             shift 2
@@ -95,7 +105,7 @@ NEO4J_USER="${NEO4J_USER:-neo4j}"
 NEO4J_PASSWORD="${NEO4J_PASSWORD:-password123}"
 NEO4J_DB="${NEO4J_DB:-neo4j}"
 
-CYPHER_SHELL_BASE=(cypher-shell -u "${NEO4J_USER}" -p "${NEO4J_PASSWORD}" -d "${NEO4J_DB}")
+CYPHER_SHELL_BASE=(cypher-shell -a neo4j://"${NEO4J_HOST}":"${NEO4J_BOLT_PORT}" -u "${NEO4J_USER}" -p "${NEO4J_PASSWORD}" -d "${NEO4J_DB}")
 
 # Normalize dataset name for folder names (remove hyphens)
 # e.g., "fb15k-237" -> "fb15k237", "nell-955" -> "nell955"
@@ -223,6 +233,8 @@ else
     log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
     mkdir -p "${CRC_DATA_DIR}"
     python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
+        --neo4j-host "${NEO4J_HOST}" \
+        --neo4j-bolt-port "${NEO4J_BOLT_PORT}" \
         --generate-3p \
         --generate-2ip \
         --generate-2u \
@@ -238,7 +250,7 @@ else
 fi
 
 log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
-python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}"
+python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
 
 log INFO "Calibration generation pipeline completed successfully"
 log INFO "Generated calibration and test queries:"

@@ -216,6 +216,7 @@ artifacts/snapshots/*/*cache
 artifacts/inference_logs/
 artifacts/data/yago310/
 artifacts/benchmark/
+artifacts/non_vector_crc_cache
 queries/
 external/
 prep_env.sh

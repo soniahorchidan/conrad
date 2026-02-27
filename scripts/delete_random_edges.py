@@ -49,8 +49,11 @@ if __name__ == '__main__':
         '--perc', type=float, required=True,
         help='Percentage of edges to delete (0-100)'
     )
+    parser.add_argument("--neo4j-host", type=str, default="localhost",
+                       help="Neo4j host (default: localhost)")
+    parser.add_argument("--neo4j-bolt-port", type=int, default=7687,
+                       help="Neo4j bolt port (default: 7687)")
 
-    uri = "bolt://localhost:7687"
     user = "neo4j"
     password = "password123"
 
@@ -58,4 +61,6 @@ if __name__ == '__main__':
     if not 0 <= args.perc <= 100:
         parser.error('perc must be between 0 and 100')
 
+    uri = f"bolt://{args.neo4j_host}:{args.neo4j_bolt_port}"
+    print("Deleting edges on Neo4j instance:", uri)
     delete_random_edges(uri, user, password, args.perc)
