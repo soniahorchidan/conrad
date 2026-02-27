@@ -140,6 +140,7 @@ celerybeat.pid
 .venv
 env/
 venv/
+*venv
 ENV/
 env.bak/
 venv.bak/
@@ -205,3 +206,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# Conrad
+artifacts/databases/
+artifacts/snapshots/motif/
+artifacts/snapshots/ultra_fb15k237/
+artifacts/snapshots/motif/
+artifacts/snapshots/*/*cache
+artifacts/inference_logs/
+artifacts/data/yago310/
+artifacts/benchmark/
+artifacts/non_vector_crc_cache
+artifacts/*results/
+queries/
+external/
+prep_env.sh
