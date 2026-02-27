@@ -211,12 +211,14 @@ __marimo__/
 # Conrad
 artifacts/databases/
 artifacts/snapshots/motif/
-artifacts/snapshots/ultra_*
+artifacts/snapshots/ultra_fb15k237/
+artifacts/snapshots/motif/
 artifacts/snapshots/*/*cache
 artifacts/inference_logs/
 artifacts/data/yago310/
 artifacts/benchmark/
 artifacts/non_vector_crc_cache
+artifacts/*results/
 queries/
 external/
 prep_env.sh

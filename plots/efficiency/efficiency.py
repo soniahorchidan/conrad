@@ -1,185 +1,93 @@
-# import re
-# import matplotlib.pyplot as plt
-# import numpy as np
-# import os
-
-# # Regex to find: | pred: X, GT: Y
-# log_pattern = re.compile(r"pred: (\d+), GT: (\d+)")
-
-# def extract_differences_from_log(filepath):
-#     diffs = []
-#     if not os.path.exists(filepath):
-#         return []
-#     with open(filepath, 'r') as f:
-#         for line in f:
-#             match = log_pattern.search(line)
-#             if match:
-#                 # Calculate the difference: |Pred| - |GT|
-#                 diff = int(match.group(1)) - int(match.group(2))
-#                 diffs.append(diff)
-#     return diffs
-
-# # 3hop pipelines
-# # fb15k237
-# PATH = "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260106_093514"
-# # nell995
-# # PATH = "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260109_121116"
-
-# # 2u pipelines
-# # fb15k237
-# # PATH = "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260106_115302"
-# # nell995
-# # PATH = "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260109_132951"
-
-# # 2ip pipelines
-# # PATH = "/home/sfhor/orb-dev/orb/ml_engine/crc_benchmark_results_20260106_155858"
-# labels = ['0.5', '0.6', '0.7', '0.8', '0.9']
-
-# # Prepare data as a list of lists for matplotlib
-# data_to_plot = [
-#     extract_differences_from_log(os.path.join(PATH, f'benchmark_conf_{l}.log')) 
-#     for l in labels
-# ]
-
-# fig, ax = plt.subplots(figsize=(5, 2.5))
-
-# # Create the boxplot
-# # patch_artist=True allows us to fill the boxes with color
-# # showfliers=False removes the outliers for a cleaner "system" view
-# # bp = ax.boxplot(data_to_plot, 
-# #                 patch_artist=True, 
-# #                 showfliers=True,
-# #                 whis=[5, 95],
-# #                 widths=0.6,
-# #                 flierprops=dict(marker='o', markersize=2, color='gray', alpha=0.2),
-# #                 medianprops=dict(color="black", linewidth=1.5))
-
-# # horizontal boxplot
-# bp = ax.boxplot(data_to_plot, 
-#                 vert=False,          
-#                 patch_artist=True, 
-#                 showfliers=True,
-#                 whis=[5, 95],
-#                 widths=0.4,
-#                 flierprops=dict(marker='o', markersize=4, color='gray', alpha=0.2),
-#                 medianprops=dict(color="black", linewidth=1.5))
-
-# # Optional: Use symlog if you still have those massive outliers
-# ax.set_xscale('symlog', linthresh=10) 
-
-# # Styling the boxes
-# # colors = ['C0', 'C0', 'C0', 'C0', 'C0']
-# # for patch, color in zip(bp['boxes'], colors):
-# #     patch.set_facecolor(color)
-
-# for patch in bp['boxes']:
-#     patch.set_facecolor('none')  # Removes the blue fill
-#     patch.set_edgecolor('C0')
-
-# # Change to a vertical line at 0
-# ax.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Perfect Plan')
-
-# # Swap labels and tick axes
-# ax.set_xlabel('Set Size Difference (|Pred| - |GT|)', fontsize=11)
-# ax.set_ylabel('Target Recall ($1 - \\alpha$)', fontsize=11)
-# ax.set_yticklabels(['0.5', '0.6', '0.7', '0.8', '0.9'])
-
-# # Grid now follows the x-axis (the values)
-# ax.grid(True, alpha=0.6)
-# ax.legend(fontsize=10)
-# plt.tight_layout()
-# plt.savefig('set_size_efficiency_3p_fb15k237.png', dpi=300)
-
 import re
 import matplotlib.pyplot as plt
 import numpy as np
-import os
+from pathlib import Path
+
+# Base path to benchmark results
+base_path = Path("/data/sonia/conrad/artifacts/final_results/benchmark_latency_objective_normalized")
 
 # Regex to find: | pred: X, GT: Y
 log_pattern = re.compile(r"pred: (\d+), GT: (\d+)")
 
 def extract_differences_from_log(filepath):
     diffs = []
-    if not os.path.exists(filepath):
-        print(f"Warning: File not found: {filepath}")
+    if not Path(filepath).exists():
         return []
     with open(filepath, 'r') as f:
         for line in f:
             match = log_pattern.search(line)
             if match:
-                # Calculate the difference: |Pred| - |GT|
+                # Difference: |Pred| - |GT|
                 diff = int(match.group(1)) - int(match.group(2))
                 diffs.append(diff)
     return diffs
 
-# --- Configuration Mapping ---
-# Added all your paths into a structured dictionary
-configs = {
-    "3p": {
-        "fb15k237": "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260106_093514",
-        "nell995": "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260109_121116"
-    },
-    "2u": {
-        "fb15k237": "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260106_115302",
-        "nell995": "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260109_132951"
-    },
-    "2ip": {
-        "fb15k237": "/home/sfhor/orb-dev/orb/ml_engine/conrad_logs/crc_benchmark_results_20260106_155858"
-    }
+# --- Configuration ---
+datasets = ["nell-955",]
+dataset_labels = ["nell995"]
+query_types = ["2ip"]
+query_type_map = {
+    "3p": "ThreeHopPipeline",
+    # "2u": "TwoUnionPipeline",
+    "2ip": "TwoIntersectProjectPipeline"
 }
+confidence_levels = ['0.6', '0.7', '0.8', '0.9']
+sparsity = 20  # Using 20% missing data
 
-labels = ['0.5', '0.6', '0.7', '0.8', '0.9']
+fig, axes = plt.subplots(len(query_types), len(datasets), figsize=(5*len(datasets),1.5), sharey=True, squeeze=False)
 
-# --- Main Plotting Loop ---
-for query_type, datasets in configs.items():
-    for dataset_name, path in datasets.items():
-        print(f"Processing: {query_type} - {dataset_name}...")
+for r, q_type in enumerate(query_types):
+    for c, (dataset, d_label) in enumerate(zip(datasets, dataset_labels)):
+        ax = axes[r, c]
         
-        data_to_plot = [
-            extract_differences_from_log(os.path.join(path, f'benchmark_conf_{l}.log')) 
-            for l in labels
-        ]
-
-        # Check if we actually have data to plot
-        if not any(data_to_plot):
-            continue
-
-        fig, ax = plt.subplots(figsize=(4, 2))
-
-        # Horizontal boxplot
-        bp = ax.boxplot(data_to_plot, 
-                        vert=False,          
-                        patch_artist=True, 
-                        showfliers=True,
-                        whis=[5, 95],
-                        widths=0.4,
-                        flierprops=dict(marker='o', markersize=4, color='gray', alpha=0.2),
-                        medianprops=dict(color="black", linewidth=1.5))
-
-        # Use symlog for massive outliers
-        ax.set_xscale('symlog', linthresh=10) 
-
-        # Styling
-        for patch in bp['boxes']:
-            patch.set_facecolor('none')
-            patch.set_edgecolor('C0')
-
-        ax.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Perfect Plan')
+        # Construct the directory path
+        query_pipeline = query_type_map[q_type]
+        dir_name = f"conrad_bench_{dataset}_{query_pipeline}_{sparsity}"
+        dir_path = base_path / dir_name
         
-        # Labels and Titles
-        ax.set_title(f"{query_type} ({dataset_name})", fontsize=12)
-        ax.set_xlabel('Set Size Difference (|Pred| - |GT|)', fontsize=11)
-        ax.set_ylabel('Target Recall ($1 - \\alpha$)', fontsize=11)
-        ax.set_yticklabels(labels)
-
+        if dir_path.exists():
+            print(f"Loading {d_label} {q_type} from {dir_name}")
+            data_to_plot = [
+                extract_differences_from_log(dir_path / f'benchmark_conf_{conf}.log') 
+                for conf in confidence_levels
+            ]
+            
+            if any(data_to_plot):
+                bp = ax.boxplot(data_to_plot, vert=False, patch_artist=True, 
+                                showfliers=True, whis=[5, 95], widths=0.4,
+                                flierprops=dict(marker='o', markersize=4, color='gray', alpha=0.2),
+                                medianprops=dict(color="black", linewidth=1.5))
+                
+                # Styling
+                for patch in bp['boxes']:
+                    patch.set_facecolor('none')
+                    patch.set_edgecolor('C0')
+                
+                ax.set_xscale('symlog', linthresh=10)
+                ax.axvline(0, color='red', linestyle='--', linewidth=1.5)
+        else:
+            print(f"Directory not found: {dir_name}")
+        
+        # Titles and labels
+        if c == 0: ax.set_ylabel(f"Target Recall", fontsize=9)
+        # if r == 0 and c == 0: ax.set_title(d_label, fontsize=12)
+        if r == len(query_types) - 1: ax.set_xlabel("|Pred| - |GT|", fontsize=9)
+        
         ax.grid(True, alpha=0.6)
-        ax.legend(fontsize=10)
-        
-        plt.tight_layout()
-        
-        # Save with a dynamic filename
-        filename = f'set_size_efficiency_{query_type}_{dataset_name}.png'
-        plt.savefig(filename, dpi=300)
-        plt.close() # Close plot to free up memory
 
-print("All plots generated successfully.")
+# Set yticks and labels once for all subplots (since sharey=True)
+for ax in axes.flat:
+    ax.set_yticks(range(1, len(confidence_levels) + 1))
+    ax.set_yticklabels(confidence_levels, fontsize=9)
+    ax.tick_params(axis='x', labelsize=9)
+    ax.invert_yaxis()
+
+# Place the legend in the upper left
+handles = [plt.Line2D([0], [0], color='red', linestyle='--', label='Ground Truth')]
+fig.legend(handles=handles, loc='lower right', fontsize=9, bbox_to_anchor=(0.98, 0.65))
+
+plt.tight_layout()
+plt.savefig('conrad_efficiency.png', dpi=300, bbox_inches='tight')
+plt.savefig('conrad_efficiency.pdf', dpi=300, bbox_inches='tight')
+
+print("\nPlot saved to conrad_efficiency.png")
