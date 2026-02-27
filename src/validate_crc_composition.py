@@ -127,6 +127,8 @@ class QueryResult:
     ground_truth: List[int]
     is_abstained: bool = False  # True if no prediction was made (empty prediction set)
     query_time_ms: float = 0.0  # Query execution time in milliseconds
+    neo4j_calls: int = 0  # Total Neo4j calls for this query
+    ultra_calls: int = 0  # Total ULTRA (neural) calls for this query
 
 
 class CRCBenchmarkValidator:
@@ -239,21 +241,25 @@ class CRCBenchmarkValidator:
         return entity_id, rel_types, confidence
     
     def run_prediction(self, model, query_tensor: torch.Tensor, 
-                       confidence: float, graph_data: Any) -> List[List[int]]:
-        """Run model prediction. Returns list of predictions (one per query in batch)."""
+                       confidence: float, graph_data: Any) -> Tuple[List[List[int]], Optional[Dict[str, List[int]]]]:
+        """Run model prediction. Returns (predictions, metadata). metadata has 'neo4j_calls' and 'ultra_calls' per query when available."""
         with torch.no_grad():
-            results = model.predict(query_tensor, confidence, graph_data)
+            raw = model.predict(query_tensor, confidence, graph_data)
+        
+        # Pipeline may return (predictions, metadata) or legacy just predictions
+        if isinstance(raw, tuple) and len(raw) == 2:
+            results, metadata = raw
+        else:
+            results = raw
+            metadata = None
         
         if isinstance(results, list):
-            # Handle batched results
             if len(results) > 0 and isinstance(results[0], list):
-                # Results is already a list of lists
-                return results
+                return results, metadata
             elif len(results) > 0:
-                # Single result, wrap in list
-                return [results]
+                return [results], metadata
             else:
-                return []
+                return [], metadata
         else:
             raise ValueError(f"Unexpected results format: {type(results)}")
     
@@ -306,7 +312,7 @@ class CRCBenchmarkValidator:
             assert query_tensor.shape == expected_shape, f"Expected tensor shape {expected_shape}, got {query_tensor.shape}"
             
             start_time = time.time()
-            predicted_batch = self.run_prediction(model, query_tensor, confidence, graph_data)
+            predicted_batch, metadata = self.run_prediction(model, query_tensor, confidence, graph_data)
             query_time_ms = (time.time() - start_time) * 1000
             
             predicted_values = self._convert_to_int_list(predicted_batch[0]) if predicted_batch else []
@@ -316,7 +322,12 @@ class CRCBenchmarkValidator:
             fnr, precision, f1 = compute_fnr_metrics([predicted_values], [ground_truth])
             recall = 1 - fnr
             
-            return QueryResult(precision, recall, f1, predicted_values, ground_truth, is_abstained, query_time_ms)
+            neo4j_calls = metadata["neo4j_calls"][0] if metadata and metadata.get("neo4j_calls") else 0
+            ultra_calls = metadata["ultra_calls"][0] if metadata and metadata.get("ultra_calls") else 0
+            return QueryResult(
+                precision, recall, f1, predicted_values, ground_truth, is_abstained, query_time_ms,
+                neo4j_calls=neo4j_calls, ultra_calls=ultra_calls
+            )
             
         except (ValueError, TimeoutError, Exception) as e:
             logging.error(f"Error processing query: {e}", exc_info=True)
@@ -364,7 +375,7 @@ class CRCBenchmarkValidator:
                 
                 if result:
                     self.all_results[query_type][query_file].append(result)
-                    # print(f"Query {i+1} - Precision: {result.precision:.4f}, Recall: {result.recall:.4f}, F1: {result.f1:.4f} | pred: {len(result.predicted_values)}, GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms")
+                    print(f"Query {i+1} - Precision: {result.precision:.4f}, Recall: {result.recall:.4f}, F1: {result.f1:.4f} | pred: {len(result.predicted_values)}, GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms | Neo4j: {result.neo4j_calls}, ULTRA: {result.ultra_calls}")
         
         total_time_seconds = time.time() - start_time
         total_time_ms = total_time_seconds * 1000
@@ -401,10 +412,13 @@ class CRCBenchmarkValidator:
     
     def _convert_predictions_to_results(self, predicted_batch: List[List[int]], 
                                        ground_truths: List[List[int]], 
-                                       batch_time_ms: float) -> List[QueryResult]:
+                                       batch_time_ms: float,
+                                       metadata: Optional[Dict[str, List[int]]] = None) -> List[QueryResult]:
         """Convert batch predictions to QueryResult objects."""
         results = []
-        for pred, gt in zip(predicted_batch, ground_truths):
+        neo4j_list = metadata.get("neo4j_calls", []) if metadata else []
+        ultra_list = metadata.get("ultra_calls", []) if metadata else []
+        for idx, (pred, gt) in enumerate(zip(predicted_batch, ground_truths)):
             pred = self._convert_to_int_list(pred)
             gt = [int(x) for x in gt] if gt else []
             is_abstained = len(pred) == 0
@@ -413,7 +427,12 @@ class CRCBenchmarkValidator:
             recall = 1 - fnr
             
             query_time_ms = batch_time_ms / len(predicted_batch) if len(predicted_batch) > 0 else 0
-            results.append(QueryResult(precision, recall, f1, pred, gt, is_abstained, query_time_ms))
+            neo4j_calls = neo4j_list[idx] if idx < len(neo4j_list) else 0
+            ultra_calls = ultra_list[idx] if idx < len(ultra_list) else 0
+            results.append(QueryResult(
+                precision, recall, f1, pred, gt, is_abstained, query_time_ms,
+                neo4j_calls=neo4j_calls, ultra_calls=ultra_calls
+            ))
         return results
     
     def _load_queries_from_file(self, query_file: str) -> List[str]:
@@ -443,7 +462,8 @@ class CRCBenchmarkValidator:
                 print(f"Query {query_idx}/{total_queries} - "
                       f"Precision: {result.precision:.4f}, Recall: {result.recall:.4f}, "
                       f"F1: {result.f1:.4f} | pred: {len(result.predicted_values)}, "
-                      f"GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms")
+                      f"GT: {len(result.ground_truth)} | Time: {result.query_time_ms:.2f}ms | "
+                      f"Neo4j: {result.neo4j_calls}, ULTRA: {result.ultra_calls}")
     
     def _log_summary(self, start_time: float, query_type: str):
         """Log summary statistics after processing all queries."""
@@ -495,10 +515,12 @@ class CRCBenchmarkValidator:
             batch_query, batch_confidence = self._build_batch_tensor(queries, override_confidence)
             
             batch_start_time = time.time()
-            predicted_batch = self.run_prediction(model, batch_query, batch_confidence, graph_data)
+            predicted_batch, metadata = self.run_prediction(model, batch_query, batch_confidence, graph_data)
             batch_time_ms = (time.time() - batch_start_time) * 1000
             
-            return self._convert_predictions_to_results(predicted_batch, ground_truths, batch_time_ms)
+            return self._convert_predictions_to_results(
+                predicted_batch, ground_truths, batch_time_ms, metadata=metadata
+            )
             
         except Exception as e:
             logging.error(f"Error processing batch: {e}", exc_info=True)
@@ -565,8 +587,15 @@ class CRCBenchmarkValidator:
             abstained_count = sum(1 for r in all_results_list if r.is_abstained)
             abstention_rate = abstained_count / total_queries
             
+            # Invocation stats (Neo4j / ULTRA calls per query)
+            avg_neo4j = sum(r.neo4j_calls for r in all_results_list) / total_queries
+            avg_ultra = sum(r.ultra_calls for r in all_results_list) / total_queries
+            total_neo4j = sum(r.neo4j_calls for r in all_results_list)
+            total_ultra = sum(r.ultra_calls for r in all_results_list)
+            
             print(f"\nOVERALL AVERAGE (All queries): Precision={overall_precision:.4f}, Recall={overall_recall:.4f}, F1={overall_f1:.4f} | Avg Time: {overall_avg_time_ms:.2f}ms")
             print(f"Abstention rate: {abstention_rate:.4f} ({abstained_count}/{total_queries})")
+            print(f"Invocation totals: Neo4j calls: {total_neo4j} (avg {avg_neo4j:.1f}/query), ULTRA calls: {total_ultra} (avg {avg_ultra:.1f}/query)")
             
             # Non-abstained metrics
             non_abstained_results = [r for r in all_results_list if not r.is_abstained]
@@ -658,11 +687,11 @@ class CRCBenchmarkValidator:
             
             # Run prediction with configured confidence
             start_time = time.time()
-            predicted_batch = self.run_prediction(
+            predicted_batch, _ = self.run_prediction(
                 model, query_tensor, self.config.confidence, graph_data
             )
             query_time_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
-            # Extract single result from batch (run_prediction returns list of lists)
+            # Extract single result from batch (run_prediction returns (list of lists, metadata))
             predicted_values = self._convert_to_int_list(predicted_batch[0]) if predicted_batch else []
             
             # GT already extracted above for filtering

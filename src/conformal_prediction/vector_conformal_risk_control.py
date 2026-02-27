@@ -208,19 +208,28 @@ class VectorConformalRiskControl:
         # Use the model's unified prediction method
         # This ensures consistent threshold application for both calibration and inference
         predictions = []
+        neo4j_calls_list = []
+        ultra_calls_list = []
         
         if ground_truth_hops is None:
             for x_i in x:
                 with torch.no_grad():
-                    pred = self.model.predict_with_thresholds(x_i.unsqueeze(0), thresholds, graph_data, None)
-                    predictions.append(pred[0])  # Extract first (and only) query result
+                    result = self.model.predict_with_thresholds(x_i.unsqueeze(0), thresholds, graph_data, None)
+                    pred_list, neo4j_per_query, ultra_per_query = result[0], result[1], result[2]
+                    predictions.append(pred_list[0])
+                    neo4j_calls_list.append(neo4j_per_query[0] if neo4j_per_query else 0)
+                    ultra_calls_list.append(ultra_per_query[0] if ultra_per_query else 0)
         else:
             for x_i, gt in zip(x, ground_truth_hops):
                 with torch.no_grad():
-                    pred = self.model.predict_with_thresholds(x_i.unsqueeze(0), thresholds, graph_data, [gt])
-                    predictions.append(pred[0])  # Extract first (and only) query result
+                    result = self.model.predict_with_thresholds(x_i.unsqueeze(0), thresholds, graph_data, [gt])
+                    pred_list, neo4j_per_query, ultra_per_query = result[0], result[1], result[2]
+                    predictions.append(pred_list[0])
+                    neo4j_calls_list.append(neo4j_per_query[0] if neo4j_per_query else 0)
+                    ultra_calls_list.append(ultra_per_query[0] if ultra_per_query else 0)
         
-        return predictions
+        metadata = {"neo4j_calls": neo4j_calls_list, "ultra_calls": ultra_calls_list}
+        return predictions, metadata
     
     def _get_or_optimize_thresholds(self, alpha: float) -> Any:
         """

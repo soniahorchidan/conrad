@@ -67,38 +67,45 @@ class DBExecModel(nn.Module, ModelUtils):
         # Minimum fallback when popularity stats are missing - ensure > 0.5
         self._pop_epsilon = 0.51
 
-    def _compute_scores(self, results, rel_type):
+    def _compute_scores(self, results, rel_type, head_id):
         """
         Compute confidence scores for query results based on edge and node popularity.
+        Scores are unique per (head, rel, tail) triple and deterministic.
         
         Args:
-            results: List of node IDs from query results
+            results: List of tail node IDs from query results
             rel_type: The relation type (edge type) - can be tensor or string
+            head_id: The head entity ID for this query
             
         Returns:
-            Dictionary mapping node_id -> confidence score
+            Dictionary mapping tail_id -> confidence score (unique per (head, rel, tail))
         """
         # Get edge popularity with fallback
         edge_pop = self.edge_popularity_map.get(str(rel_type), {}).get("popularity")
         if not edge_pop:
             edge_pop = self._pop_epsilon
         
-        # Compute scores for each result node
+        # Get head popularity with fallback
+        head_pop = self.node_degree_popularity.get(str(head_id), {}).get("popularity")
+        if not head_pop:
+            head_pop = self._pop_epsilon
+        
+        # Compute scores for each result node (tail)
         query_scores = {}
-        for r in results:
-            node_pop = self.node_degree_popularity.get(str(r), {}).get("popularity")
-            if not node_pop:
-                node_pop = self._pop_epsilon
+        for tail_id in results:
+            tail_pop = self.node_degree_popularity.get(str(tail_id), {}).get("popularity")
+            if not tail_pop:
+                tail_pop = self._pop_epsilon
             
-            # Weighted average: ensures > 0.5 when both are > 0.5
-            # If both are at minimum (0.51), result is 0.51
-            # If one is missing (0.51) and one is found (>0.51), result > 0.51
-            confidence = 0.5 * edge_pop + 0.5 * node_pop
+            # Weighted average of head, relation, and tail popularity
+            # Ensures > 0.5 when all components are >= 0.51
+            # Same triple (head, rel, tail) always gets same score (deterministic)
+            confidence = (head_pop + edge_pop + tail_pop) / 3.0
             
             # Ensure minimum is strictly > 0.5
             confidence = max(confidence, 0.51)
             
-            query_scores[r] = confidence
+            query_scores[tail_id] = confidence
         return query_scores
 
     def predict(
@@ -120,7 +127,7 @@ class DBExecModel(nn.Module, ModelUtils):
             results.append(res)
             
             if len(res) > 0:
-                scores.append(self._compute_scores(res, q[1]))
+                scores.append(self._compute_scores(res, q[1], q[0]))
             else:
                 scores.append({})
                 
@@ -203,7 +210,7 @@ class DBExecModel(nn.Module, ModelUtils):
             results[idx] = query_results
             
             if len(query_results) > 0:
-                scores[idx] = self._compute_scores(query_results, rel_type)
+                scores[idx] = self._compute_scores(query_results, rel_type, node_id)
             else:
                 scores[idx] = {}
 
@@ -241,7 +248,8 @@ class DBExecModel(nn.Module, ModelUtils):
             results[idx] = query_results
             
             if len(query_results) > 0:
-                scores[idx] = self._compute_scores(query_results, rel1_type)
+                # Use final relation (rel2) for scoring: (head, rel2, tail)
+                scores[idx] = self._compute_scores(query_results, rel2_type, node_id)
             else:
                 scores[idx] = {}
 
@@ -280,7 +288,8 @@ class DBExecModel(nn.Module, ModelUtils):
             results[idx] = query_results
             
             if len(query_results) > 0:
-                scores[idx] = self._compute_scores(query_results, rel1_type)
+                # Use final relation (rel3) for scoring: (head, rel3, tail)
+                scores[idx] = self._compute_scores(query_results, rel3_type, node_id)
             else:
                 scores[idx] = {}
 

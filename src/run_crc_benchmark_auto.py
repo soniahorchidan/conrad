@@ -198,9 +198,9 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
     
     results_csv = os.path.join(output_dir, "results_summary.csv")
     
-    # Create CSV header with both all-queries and non-abstained metrics
+    # Create CSV header with both all-queries and non-abstained metrics + invocation counts
     with open(results_csv, 'w') as f:
-        f.write("confidence,precision,recall,f1,abstention_rate,non_abs_precision,non_abs_recall,non_abs_f1,num_queries,num_non_abstained\n")
+        f.write("confidence,precision,recall,f1,abstention_rate,non_abs_precision,non_abs_recall,non_abs_f1,num_queries,num_non_abstained,avg_neo4j_calls,avg_ultra_calls,total_neo4j_calls,total_ultra_calls\n")
     
     for conf in confidence_levels:
         print(f"\n>>> Running benchmark for confidence = {conf}")
@@ -239,6 +239,11 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
         
         # Look for "Total queries processed: X"
         queries_match = re.search(r'Total queries processed:\s*(\d+)', log_content)
+        # Look for "Invocation totals: Neo4j calls: X (avg Y/query), ULTRA calls: Z (avg W/query)"
+        invocation_match = re.search(
+            r'Invocation totals:\s*Neo4j calls:\s*(\d+)\s*\(avg\s*([\d.]+)/query\),\s*ULTRA calls:\s*(\d+)\s*\(avg\s*([\d.]+)/query\)',
+            log_content
+        )
         
         if overall_all_match and abstention_match and queries_match:
             # All queries metrics
@@ -266,9 +271,18 @@ def run_benchmark_sweep(confidence_levels: List[float], output_dir: str,
                 non_abs_f1 = 0.0
                 num_non_abstained = 0
             
+            # Invocation counts (optional; may be missing in older logs)
+            if invocation_match:
+                total_neo4j = int(invocation_match.group(1))
+                avg_neo4j = float(invocation_match.group(2))
+                total_ultra = int(invocation_match.group(3))
+                avg_ultra = float(invocation_match.group(4))
+            else:
+                avg_neo4j = total_neo4j = avg_ultra = total_ultra = ""
+            
             # Append to CSV
             with open(results_csv, 'a') as f:
-                f.write(f"{conf},{precision},{recall},{f1},{abstention_rate},{non_abs_precision},{non_abs_recall},{non_abs_f1},{num_queries},{num_non_abstained}\n")
+                f.write(f"{conf},{precision},{recall},{f1},{abstention_rate},{non_abs_precision},{non_abs_recall},{non_abs_f1},{num_queries},{num_non_abstained},{avg_neo4j},{avg_ultra},{total_neo4j},{total_ultra}\n")
             
             print(f"Results (All): Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
             print(f"  Abstention: {abstention_rate:.4f} ({abstained_count}/{num_queries})")
@@ -295,7 +309,7 @@ def main():
         epilog="Additional arguments after '--' will be passed to validate_crc_composition.py"
     )
     parser.add_argument("--confidence-levels", nargs='+', type=float, 
-                       default=[0.5, 0.6, 0.7],
+                       default=[0.7, 0.8, 0.9, 0.95],
                        help="Confidence levels to test (default: 0.5 0.6 0.7)")
     parser.add_argument("--max-calibration-queries", type=int, default=100,
                        help="Number of queries for calibration (default: 100)")

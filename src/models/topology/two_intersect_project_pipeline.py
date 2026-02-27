@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from argparse import Namespace
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from .base import BasePipeline
 
 
@@ -42,32 +42,29 @@ class TwoIntersectProjectPipeline(BasePipeline):
     
     @torch.no_grad()
     def predict_with_thresholds(self, query: torch.Tensor, lamhat: List[float], graph_data: Any,
-                               ground_truth: Optional[List[List[int]]] = None) -> List[List[int]]:
+                               ground_truth: Optional[List[List[int]]] = None) -> Tuple[List[List[int]], List[int], List[int]]:
         """
         Run 2ip inference with threshold-based filtering using 3D optimization.
         
         Args:
             query: Tensor of shape (batch_size, 5) containing [anchor1, rel1, anchor2, rel2, rel3]
-            lamhat: List of 3 thresholds [τ_branch1, τ_branch2, τ_proj]:
-                    - τ_branch1: Applied independently to branch1 scores
-                    - τ_branch2: Applied independently to branch2 scores
-                    - τ_proj: Applied to MAX-aggregated projection scores
+            lamhat: List of 3 thresholds [τ_branch1, τ_branch2, τ_proj]
             graph_data: Graph data for inference
             ground_truth: Optional dict with GT nodes per hop (used during calibration for filtering)
             
         Returns:
-            List of predicted entity lists (from projection), one per query
+            (predictions, neo4j_calls_per_query, ultra_calls_per_query)
         """
-        batch_results = self._predict(query, lamhat, graph_data, ground_truth)
+        batch_results, neo4j_per_query, ultra_per_query = self._predict(query, lamhat, graph_data, ground_truth)
         
         # Extract final projection nodes
         predictions = [result["final_nodes"] for result in batch_results]
         
-        return predictions
+        return predictions, neo4j_per_query, ultra_per_query
     
     @torch.no_grad()
     def _predict(self, query: torch.Tensor, lamhat: List[float], graph_data: Any,
-                ground_truth: Optional[List[List[int]]] = None) -> List[Dict[str, Any]]:
+                ground_truth: Optional[List[List[int]]] = None) -> Tuple[List[Dict[str, Any]], List[int], List[int]]:
         if query.dim() == 1:
             query = query.unsqueeze(0)
 
@@ -76,6 +73,8 @@ class TwoIntersectProjectPipeline(BasePipeline):
         
         batch_size = query.shape[0]
         batch_results = []
+        neo4j_per_query = [0] * batch_size
+        ultra_per_query = [0] * batch_size
         
         for i in range(batch_size):
             anchor1, rel1 = query_cpu[i, 0].item(), query_cpu[i, 1].item()
@@ -90,11 +89,15 @@ class TwoIntersectProjectPipeline(BasePipeline):
             # 1. Branch Execution
             source1_t = torch.tensor([[anchor1]], dtype=torch.long, device=self.device)
             rel1_t = torch.tensor([[rel1]], dtype=torch.long, device=self.device)
-            scores1, _ = self.unified_predictor.predict(source1_t, rel1_t, graph_data, threshold=t_branch1)
+            scores1, _, n1, u1 = self.unified_predictor.predict(source1_t, rel1_t, graph_data, threshold=t_branch1)
+            neo4j_per_query[i] += n1
+            ultra_per_query[i] += u1
             
             source2_t = torch.tensor([[anchor2]], dtype=torch.long, device=self.device)
             rel2_t = torch.tensor([[rel2]], dtype=torch.long, device=self.device)
-            scores2, _ = self.unified_predictor.predict(source2_t, rel2_t, graph_data, threshold=t_branch2)
+            scores2, _, n2, u2 = self.unified_predictor.predict(source2_t, rel2_t, graph_data, threshold=t_branch2)
+            neo4j_per_query[i] += n2
+            ultra_per_query[i] += u2
             
             # Apply thresholds independently to each branch
             branch1_nodes = self._extract_nodes_from_scores(scores1, t_branch1)
@@ -134,7 +137,11 @@ class TwoIntersectProjectPipeline(BasePipeline):
                     int_tensor = torch.tensor(b_nodes, dtype=torch.long, device=self.device).unsqueeze(1)
                     rel3_tensor = torch.tensor([[rel3]] * len(b_nodes), dtype=torch.long, device=self.device)
                     
-                    p_scores, _ = self.unified_predictor.predict(int_tensor, rel3_tensor, graph_data, threshold=t_proj)
+                    p_scores, _, nproj, uproj = self.unified_predictor.predict(
+                        int_tensor, rel3_tensor, graph_data, threshold=t_proj
+                    )
+                    neo4j_per_query[i] += nproj
+                    ultra_per_query[i] += uproj
                     
                     for j, parent_id in enumerate(b_nodes):
                         s_vec = p_scores[j].detach().cpu()
@@ -197,7 +204,7 @@ class TwoIntersectProjectPipeline(BasePipeline):
                 "final_nodes": final_nodes
             })
         
-        return batch_results
+        return batch_results, neo4j_per_query, ultra_per_query
     
     def _apply_2ip_gt_filtering(self, scores1: torch.Tensor, scores2: torch.Tensor, 
                                 t_branch1: float, t_branch2: float,
@@ -347,3 +354,93 @@ class TwoIntersectProjectPipeline(BasePipeline):
             predictions.append(final_indices.tolist())
             
         return predictions
+
+    @staticmethod
+    def apply_thresholds_to_scores_with_intermediate_sizes(
+        cal_scores, thresholds, true_labels=None, num_entities: int = 14541,
+    ) -> Tuple[List[List[int]], List[Tuple[int, int, int, int]]]:
+        """
+        Apply thresholds and return predictions plus intermediate set sizes per query.
+        Returns (predictions, list of (s_branch1, s_branch2, s_intersection, s_final) per query).
+        """
+        t_branch1 = thresholds[0] if len(thresholds) > 0 else 0.0
+        t_branch2 = thresholds[1] if len(thresholds) > 1 else 0.0
+        t_proj = thresholds[2] if len(thresholds) > 2 else 0.0
+        predictions = []
+        intermediate_sizes = []
+        for query_data in cal_scores:
+            branch1_scores = query_data['branch1']['scores']
+            branch2_scores = query_data['branch2']['scores']
+            b1_dense = TwoIntersectProjectPipeline._scores_to_dense_vector(branch1_scores, num_entities=num_entities)
+            b2_dense = TwoIntersectProjectPipeline._scores_to_dense_vector(branch2_scores, num_entities=num_entities)
+            branch1_passing = set(np.where(b1_dense >= t_branch1)[0])
+            branch2_passing = set(np.where(b2_dense >= t_branch2)[0])
+            s1 = len(branch1_passing)
+            s2 = len(branch2_passing)
+            int_passing = branch1_passing & branch2_passing
+            s3 = len(int_passing)
+            if not int_passing:
+                predictions.append([])
+                intermediate_sizes.append((s1, s2, s3, 0))
+                continue
+            proj_paths = query_data.get('projection_paths', [])
+            valid_proj_vectors = []
+            for path in proj_paths:
+                if path['parent'] in int_passing:
+                    vec = TwoIntersectProjectPipeline._scores_to_dense_vector(path['scores'], num_entities=num_entities)
+                    valid_proj_vectors.append(vec)
+            if not valid_proj_vectors:
+                predictions.append([])
+                intermediate_sizes.append((s1, s2, s3, 0))
+                continue
+            final_max_scores = np.maximum.reduce(valid_proj_vectors)
+            final_indices = np.where(final_max_scores >= t_proj)[0]
+            s4 = len(final_indices)
+            predictions.append(final_indices.tolist())
+            intermediate_sizes.append((s1, s2, s3, s4))
+        return predictions, intermediate_sizes
+
+    @staticmethod
+    def apply_thresholds_to_scores_with_call_counts(
+        cal_scores, thresholds, true_labels=None, num_entities: int = 14541,
+    ) -> Tuple[List[List[int]], List[int], List[int]]:
+        """
+        Apply thresholds and return (predictions, neo4j_per_query, ultra_per_query).
+        Call counts: 2 (branches) + len(int_passing) for projection.
+        """
+        t_branch1 = thresholds[0] if len(thresholds) > 0 else 0.0
+        t_branch2 = thresholds[1] if len(thresholds) > 1 else 0.0
+        t_proj = thresholds[2] if len(thresholds) > 2 else 0.0
+        predictions = []
+        neo4j_per_query = []
+        ultra_per_query = []
+        for query_data in cal_scores:
+            branch1_scores = query_data['branch1']['scores']
+            branch2_scores = query_data['branch2']['scores']
+            b1_dense = TwoIntersectProjectPipeline._scores_to_dense_vector(branch1_scores, num_entities=num_entities)
+            b2_dense = TwoIntersectProjectPipeline._scores_to_dense_vector(branch2_scores, num_entities=num_entities)
+            branch1_passing = set(np.where(b1_dense >= t_branch1)[0])
+            branch2_passing = set(np.where(b2_dense >= t_branch2)[0])
+            int_passing = branch1_passing & branch2_passing
+            if not int_passing:
+                predictions.append([])
+                neo4j_per_query.append(2)
+                ultra_per_query.append(2)
+                continue
+            proj_paths = query_data.get('projection_paths', [])
+            valid_proj_vectors = []
+            for path in proj_paths:
+                if path['parent'] in int_passing:
+                    vec = TwoIntersectProjectPipeline._scores_to_dense_vector(path['scores'], num_entities=num_entities)
+                    valid_proj_vectors.append(vec)
+            if not valid_proj_vectors:
+                predictions.append([])
+                neo4j_per_query.append(2 + len(int_passing))
+                ultra_per_query.append(2 + len(int_passing))
+                continue
+            final_max_scores = np.maximum.reduce(valid_proj_vectors)
+            final_indices = np.where(final_max_scores >= t_proj)[0]
+            predictions.append(final_indices.tolist())
+            neo4j_per_query.append(2 + len(int_passing))
+            ultra_per_query.append(2 + len(int_passing))
+        return predictions, neo4j_per_query, ultra_per_query

@@ -111,7 +111,13 @@ class CalibrationManager:
         }
 
     def precalibrate_thresholds(self, cal_scores: List, true_labels: List,
-                                alphas: Optional[List[float]] = None) -> Dict[float, Any]:
+                                alphas: Optional[List[float]] = None,
+                                use_strategy_selection: bool = True,
+                                objective: str = "precision",
+                                fraction_opt: float = 0.5,
+                                w_neo4j: float = 1.0,
+                                w_ultra: float = 10.0,
+                                ) -> Dict[float, Any]:
         """
         Precalibrate thresholds for common error levels.
         
@@ -120,13 +126,21 @@ class CalibrationManager:
         Args:
             cal_scores: Calibration scores
             true_labels: True labels
-            alphas: List of alpha values to calibrate for (default: [0.1, 0.2, 0.3, 0.4, 0.5])
+            alphas: List of alpha values to calibrate for (default: [0.1, 0.2, 0.3, 0.4])
+            use_strategy_selection: If True, use fraction_opt of cal for optimization and
+                the rest for objective evaluation, then pick the scalarization strategy
+                that optimizes the chosen objective.
+            objective: "cost" to minimize invocations (w_neo4j * neo4j + w_ultra * ultra),
+                      "precision" to minimize sum of prediction set sizes at each step
+            fraction_opt: Fraction of calibration data used for optimization (rest for eval).
+            w_neo4j: Cost weight per Neo4j call (only used if objective="cost").
+            w_ultra: Cost weight per ULTRA call (only used if objective="cost").
             
         Returns:
-            Dictionary mapping alpha values to thresholds
+            Dictionary mapping alpha values to thresholds (numpy arrays)
         """
         if alphas is None:
-            alphas = np.arange(0.1, 0.51, 0.1)
+            alphas = [0.1, 0.2, 0.3, 0.4]
         
         validate_calibration_data(cal_scores, true_labels)
         query_type = get_query_type_from_model(self.model_name)
@@ -136,11 +150,24 @@ class CalibrationManager:
             query_type=query_type,
             num_entities=self.num_entities,
         )
-        precalibrated_thresholds = optimizer.optimize_thresholds_batch(alphas)
+        if use_strategy_selection:
+            precalibrated_thresholds, chosen_strategy_per_alpha = optimizer.optimize_thresholds_batch_with_strategy_selection(
+                alphas, fraction_opt=fraction_opt, objective=objective,
+                w_neo4j=w_neo4j, w_ultra=w_ultra
+            )
+            logging.info(f"Chosen strategy per alpha (objective={objective}): {chosen_strategy_per_alpha}")
+        else:
+            precalibrated_thresholds = optimizer.optimize_thresholds_batch(alphas)
         logging.info(f"Batch calibration for alphas {alphas} done!")
         return precalibrated_thresholds
 
-    def create_metadata(self, cal_scores: List, true_labels: List) -> Dict[str, Any]:
+    def create_metadata(self, cal_scores: List, true_labels: List,
+                        use_strategy_selection: bool = True,
+                        objective: str = "precision",
+                        fraction_opt: float = 0.5,
+                        w_neo4j: float = 1.0,
+                        w_ultra: float = 10.0,
+                        ) -> Dict[str, Any]:
         """
         Create metadata for the calibration.
         
@@ -155,8 +182,13 @@ class CalibrationManager:
         stats = self.compute_statistics(cal_scores)
         alpha_lowerbound, alpha_upperbound = get_alpha_bounds(len(cal_scores))
         
-        # Precalibrate thresholds
-        precalibrated_thresholds = self.precalibrate_thresholds(cal_scores, true_labels)
+        # Precalibrate thresholds (with optional strategy selection)
+        precalibrated_thresholds = self.precalibrate_thresholds(
+            cal_scores, true_labels,
+            use_strategy_selection=use_strategy_selection,
+            objective=objective,
+            fraction_opt=fraction_opt, w_neo4j=w_neo4j, w_ultra=w_ultra,
+        )
 
         # Track number of components (3p has 3 hops, 2u has 2 branches) for downstream consumers.
         try:

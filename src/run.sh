@@ -9,14 +9,14 @@ DATASETS=("fb15k-237" "nell-955" "yago310")
 MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
 # Non Vector CRC
 # MODELS=("NonVector3HopNeural")
-# BASELINE_TYPES=("neural" "symbolic" "hybrid") # unused
+BASELINE_TYPES=("neural" "symbolic" "hybrid") # unused
 
 # Threshold configurations
 NEURAL_THRESHOLDS=(0.7 0.8 0.9 0.99)
-HYBRID_THRESHOLDS=(0.45 0.5 0.6 0.7)
+HYBRID_THRESHOLDS=(0.3 0.4 0.5 0.6 0.7)
 
 # Benchmark evaluation configuration
-CONFIDENCE_LEVELS=(0.5 0.6 0.7 0.8 0.9)
+CONFIDENCE_LEVELS=(0.6 0.7 0.8 0.9)
 MAX_EVAL_QUERIES=2000
 
 # Neo4j Instance
@@ -75,7 +75,16 @@ for dataset in "${DATASETS[@]}"; do
     log INFO "Processing dataset: ${dataset}"
     log INFO "=========================================="
 
-    for incompleteness in "${INCOMPLETENESS_LEVELS[@]}"; do
+    # # fb15k-237 runs all incompleteness levels; other datasets only run 20
+    # if [ "${dataset}" = "fb15k-237" ]; then
+    #     run_levels=("${INCOMPLETENESS_LEVELS[@]}")
+    # else
+    #     run_levels=("${INCOMPLETENESS_LEVELS[@]}")
+    # fi
+
+    run_levels=("${INCOMPLETENESS_LEVELS[@]}")
+
+    for incompleteness in "${run_levels[@]}"; do
         log INFO "----------------------------------------"
         log INFO "Processing dataset: ${dataset} (incompleteness: ${incompleteness}%)"
         log INFO "----------------------------------------"
@@ -128,115 +137,115 @@ for dataset in "${DATASETS[@]}"; do
             rm -rf "${CACHE_DIR}"/*
             log INFO "Cache cleared"
             
-            # Run baseline benchmarks for this model
-            query_type="${MODEL_TO_QUERY_TYPE[$model]}"
-            dataset_normalized=$(echo "${dataset}" | tr -d '-')
-            query_dir="${REPO_ROOT}/artifacts/queries/${dataset_normalized}/test/${query_type}"
+        #     # Run baseline benchmarks for this model
+        #     query_type="${MODEL_TO_QUERY_TYPE[$model]}"
+        #     dataset_normalized=$(echo "${dataset}" | tr -d '-')
+        #     query_dir="${REPO_ROOT}/artifacts/queries/${dataset_normalized}/test/${query_type}"
             
-            log INFO "Running baseline benchmarks for ${model}"
-            log INFO "Query directory: ${query_dir}"
+        #     log INFO "Running baseline benchmarks for ${model}"
+        #     log INFO "Query directory: ${query_dir}"
             
-            # Check if query directory exists
-            if [ ! -d "${query_dir}" ]; then
-                log WARN "Query directory not found: ${query_dir}, skipping baselines"
-            else
-                # Define explicit output directories for each baseline type to ensure separation
-                symbolic_output_dir="${REPO_ROOT}/artifacts/benchmark/symbolic_bench_${dataset}_${model}_${incompleteness}"
-                neural_output_dir="${REPO_ROOT}/artifacts/benchmark/neural_bench_${dataset}_${model}_${incompleteness}"
-                hybrid_output_dir="${REPO_ROOT}/artifacts/benchmark/hybrid_bench_${dataset}_${model}_${incompleteness}"
+        #     # Check if query directory exists
+        #     if [ ! -d "${query_dir}" ]; then
+        #         log WARN "Query directory not found: ${query_dir}, skipping baselines"
+        #     else
+        #         # Define explicit output directories for each baseline type to ensure separation
+        #         symbolic_output_dir="${REPO_ROOT}/artifacts/benchmark/symbolic_bench_${dataset}_${model}_${incompleteness}"
+        #         neural_output_dir="${REPO_ROOT}/artifacts/benchmark/neural_bench_${dataset}_${model}_${incompleteness}"
+        #         hybrid_output_dir="${REPO_ROOT}/artifacts/benchmark/hybrid_bench_${dataset}_${model}_${incompleteness}"
                 
-                # Run symbolic baseline (no thresholds needed)
-                log INFO "Running symbolic baseline for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
-                log INFO "Output directory: ${symbolic_output_dir}"
-                symbolic_cmd=(
-                    python -u "${BASELINE_SCRIPT}"
-                    --neo4j-host "${NEO4J_HOST}"
-                    --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
-                    --query-dir "${query_dir}"
-                    --dataset "${dataset}"
-                    --incompleteness "${incompleteness}"
-                    --baseline-type "symbolic"
-                    --output-dir "${symbolic_output_dir}"
-                    --max-queries "${max_eval_queries}"
-                )
-                if ! "${symbolic_cmd[@]}"; then
-                    log ERROR "Symbolic baseline failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
-                else
-                    log INFO "Symbolic baseline completed for ${model}"
-                fi
+        #         # Run symbolic baseline (no thresholds needed)
+        #         log INFO "Running symbolic baseline for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+        #         log INFO "Output directory: ${symbolic_output_dir}"
+        #         symbolic_cmd=(
+        #             python -u "${BASELINE_SCRIPT}"
+        #             --neo4j-host "${NEO4J_HOST}"
+        #             --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
+        #             --query-dir "${query_dir}"
+        #             --dataset "${dataset}"
+        #             --incompleteness "${incompleteness}"
+        #             --baseline-type "symbolic"
+        #             --output-dir "${symbolic_output_dir}"
+        #             --max-queries "${max_eval_queries}"
+        #         )
+        #         if ! "${symbolic_cmd[@]}"; then
+        #             log ERROR "Symbolic baseline failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+        #         else
+        #             log INFO "Symbolic baseline completed for ${model}"
+        #         fi
                 
-                # Run neural baseline with multiple thresholds
-                log INFO "Running neural baseline with thresholds: ${NEURAL_THRESHOLDS[*]}"
-                log INFO "Output directory: ${neural_output_dir}"
-                neural_cmd=(
-                    python -u "${BASELINE_SCRIPT}"
-                    --neo4j-host "${NEO4J_HOST}"
-                    --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
-                    --query-dir "${query_dir}"
-                    --dataset "${dataset}"
-                    --incompleteness "${incompleteness}"
-                    --baseline-type "neural"
-                    --output-dir "${neural_output_dir}"
-                    --max-queries "${max_eval_queries}"
-                    --ultra-batch-size 64
-                    --ultra-thresholds "${NEURAL_THRESHOLDS[@]}"
-                    --min-threshold "${NEURAL_THRESHOLDS[0]}"
-                    --use-ultraquery
-                )
-                if [ -n "${ULTRA_LOAD_PATH}" ]; then
-                    neural_cmd+=(--load-path "${ULTRA_LOAD_PATH}")
-                fi
-                if ! "${neural_cmd[@]}"; then
-                    log ERROR "Neural baseline failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
-                else
-                    log INFO "Neural baseline completed for ${model}"
-                fi
+        #         # Run neural baseline with multiple thresholds
+        #         log INFO "Running neural baseline with thresholds: ${NEURAL_THRESHOLDS[*]}"
+        #         log INFO "Output directory: ${neural_output_dir}"
+        #         neural_cmd=(
+        #             python -u "${BASELINE_SCRIPT}"
+        #             --neo4j-host "${NEO4J_HOST}"
+        #             --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
+        #             --query-dir "${query_dir}"
+        #             --dataset "${dataset}"
+        #             --incompleteness "${incompleteness}"
+        #             --baseline-type "neural"
+        #             --output-dir "${neural_output_dir}"
+        #             --max-queries "${max_eval_queries}"
+        #             --ultra-batch-size 64
+        #             --ultra-thresholds "${NEURAL_THRESHOLDS[@]}"
+        #             --min-threshold "${NEURAL_THRESHOLDS[0]}"
+        #             --use-ultraquery
+        #         )
+        #         if [ -n "${ULTRA_LOAD_PATH}" ]; then
+        #             neural_cmd+=(--load-path "${ULTRA_LOAD_PATH}")
+        #         fi
+        #         if ! "${neural_cmd[@]}"; then
+        #             log ERROR "Neural baseline failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+        #         else
+        #             log INFO "Neural baseline completed for ${model}"
+        #         fi
                 
-                # Run hybrid baseline with multiple thresholds (one run per threshold)
-                log INFO "Output directory: ${hybrid_output_dir}"
+        #         # Run hybrid baseline with multiple thresholds (one run per threshold)
+        #         log INFO "Output directory: ${hybrid_output_dir}"
                 
-                for hybrid_threshold in "${HYBRID_THRESHOLDS[@]}"; do
-                    log INFO "Running hybrid baseline with threshold ${hybrid_threshold} for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+        #         for hybrid_threshold in "${HYBRID_THRESHOLDS[@]}"; do
+        #             log INFO "Running hybrid baseline with threshold ${hybrid_threshold} for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
                     
-                    # Determine number of thresholds needed based on query type
-                    if [ "${query_type}" = "2u_pipeline" ]; then
-                        # 2u needs 2 thresholds (one per branch)
-                        hybrid_thresholds_arg=("${hybrid_threshold}" "${hybrid_threshold}")
-                    elif [ "${query_type}" = "2ip_pipeline" ]; then
-                        # 2ip needs 3 thresholds (branch1, branch2, projection)
-                        hybrid_thresholds_arg=("${hybrid_threshold}" "${hybrid_threshold}" "${hybrid_threshold}")
-                    else
-                        # 3p needs 3 thresholds (hop1, hop2, hop3)
-                        hybrid_thresholds_arg=("${hybrid_threshold}" "${hybrid_threshold}" "${hybrid_threshold}")
-                    fi
+        #             # Determine number of thresholds needed based on query type
+        #             if [ "${query_type}" = "2u_pipeline" ]; then
+        #                 # 2u needs 2 thresholds (one per branch)
+        #                 hybrid_thresholds_arg=("${hybrid_threshold}" "${hybrid_threshold}")
+        #             elif [ "${query_type}" = "2ip_pipeline" ]; then
+        #                 # 2ip needs 3 thresholds (branch1, branch2, projection)
+        #                 hybrid_thresholds_arg=("${hybrid_threshold}" "${hybrid_threshold}" "${hybrid_threshold}")
+        #             else
+        #                 # 3p needs 3 thresholds (hop1, hop2, hop3)
+        #                 hybrid_thresholds_arg=("${hybrid_threshold}" "${hybrid_threshold}" "${hybrid_threshold}")
+        #             fi
                     
-                    hybrid_cmd=(
-                        python -u "${BASELINE_SCRIPT}"
-                        --neo4j-host "${NEO4J_HOST}"
-                        --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
-                        --query-dir "${query_dir}"
-                        --dataset "${dataset}"
-                        --incompleteness "${incompleteness}"
-                        --baseline-type "hybrid"
-                        --output-dir "${hybrid_output_dir}"
-                        --max-queries "${max_eval_queries}"
-                        --ultra-batch-size 64
-                        --hybrid-thresholds "${hybrid_thresholds_arg[@]}"
-                        --use-ultraquery
-                    )
-                    if [ -n "${ULTRA_LOAD_PATH}" ]; then
-                        hybrid_cmd+=(--load-path "${ULTRA_LOAD_PATH}")
-                    fi
-                    if ! "${hybrid_cmd[@]}"; then
-                        log ERROR "Hybrid baseline (threshold=${hybrid_threshold}) failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
-                        # Continue with other thresholds
-                    else
-                        log INFO "Hybrid baseline (threshold=${hybrid_threshold}) completed for ${model}"
-                    fi
-                done
+        #             hybrid_cmd=(
+        #                 python -u "${BASELINE_SCRIPT}"
+        #                 --neo4j-host "${NEO4J_HOST}"
+        #                 --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
+        #                 --query-dir "${query_dir}"
+        #                 --dataset "${dataset}"
+        #                 --incompleteness "${incompleteness}"
+        #                 --baseline-type "hybrid"
+        #                 --output-dir "${hybrid_output_dir}"
+        #                 --max-queries "${max_eval_queries}"
+        #                 --ultra-batch-size 64
+        #                 --hybrid-thresholds "${hybrid_thresholds_arg[@]}"
+        #                 --use-ultraquery
+        #             )
+        #             if [ -n "${ULTRA_LOAD_PATH}" ]; then
+        #                 hybrid_cmd+=(--load-path "${ULTRA_LOAD_PATH}")
+        #             fi
+        #             if ! "${hybrid_cmd[@]}"; then
+        #                 log ERROR "Hybrid baseline (threshold=${hybrid_threshold}) failed for ${model} (dataset: ${dataset}, incompleteness: ${incompleteness}%)"
+        #                 # Continue with other thresholds
+        #             else
+        #                 log INFO "Hybrid baseline (threshold=${hybrid_threshold}) completed for ${model}"
+        #             fi
+        #         done
                 
-                log INFO "All baseline benchmarks completed for ${model}"
-            fi
+        #         log INFO "All baseline benchmarks completed for ${model}"
+        #     fi
         done
         
         log INFO "Completed all models for ${dataset} (incompleteness: ${incompleteness}%)"

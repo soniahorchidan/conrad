@@ -35,9 +35,11 @@ class MultiHopPredictor(nn.Module):
             # Neo4j scores are already in [0.5, 1.0] typically, but can be lower if popularity data is missing.
             # Clamp to [0.5, 1.0] to ensure they stay above ULTRA scores [0, 0.499]
             neo_final = torch.clamp(neo_scores, min_neo4j, 1.0) 
-            
+
+            ultra_normalized = torch.sigmoid(ultra_scores)  # or F.sigmoid(ultra_scores)
+
             # Normalize ULTRA to [0, 0.499] globally
-            ultra_final = ultra_scores * 0.499
+            ultra_final = ultra_normalized * 0.499
             
             # Combine
             unified = torch.where(neo_mask, neo_final, ultra_final)
@@ -250,6 +252,11 @@ class MultiHopPredictor(nn.Module):
         min_neo4j = 0.5
         s_unified = self._unified_scores_from_raw(ultra_raw, prob, min_neo4j)
         
+        # Invocation counts: total 1-hop inferences in this batch (each (source, relation) = one Neo4j + one ULTRA when not skipped)
+        batch_size = query.shape[0]
+        neo4j_calls = batch_size
+        ultra_calls = 0 if skip_ultra else batch_size
+        
         # Keep scores on-device (GPU) to avoid sync/copies in hot loops.
         # Callers can move to CPU only for the small outputs they need.
-        return s_unified, min_neo4j
+        return s_unified, min_neo4j, neo4j_calls, ultra_calls
