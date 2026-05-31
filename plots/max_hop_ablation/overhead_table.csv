@@ -1,0 +1,4 @@
+max_hop_size,calibration_s,calibration_min,inference_total_s,inference_per_1k_avg_s
+50,2280.0,38.0,455.2,113.8
+100,6059.0,100.98,595.5,148.9
+200,15473.0,257.88,901.5,225.4
