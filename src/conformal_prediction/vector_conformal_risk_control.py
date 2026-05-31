@@ -244,7 +244,9 @@ class VectorConformalRiskControl:
 
         if alpha == 0.0:
             # Confidence=1.0 would normally be handled earlier, but keep a sane default.
-            default = [0.45, 0.45] if self.model_name == "twounionpipeline" else [0.45, 0.45, 0.45]
+            # 2-component pipelines (2u, 2p, 2i) get 2 thresholds; all others get 3.
+            two_component_models = {"twounionpipeline", "twohoppipeline", "twointersectpipeline"}
+            default = [0.45, 0.45] if self.model_name in two_component_models else [0.45, 0.45, 0.45]
             logging.info(f"Alpha is 0.0, returning default thresholds {default}. DEBUG ONLY!")
             return default
 

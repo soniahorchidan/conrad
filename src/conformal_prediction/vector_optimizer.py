@@ -26,31 +26,61 @@ SCALARIZATION_STRATEGIES: Dict[str, Dict[str, Union[str, List[float]]]] = {
         "3p": "pooled",
         "2u": "pooled",
         "2ip": "pooled",
+        "2p": "pooled",
+        "2i": "pooled",
+        "3i": "pooled",
+        "pi": "pooled",
+        "up": "pooled",
     },
     "loose_early_tight_late": {
         "3p": [1.5, 1.0, 0.5],      # loose hop1, medium hop2, tight hop3
         "2u": [1.5, 1.5],            # loose branch1, tight branch2
         "2ip": [1.5, 1.5, 0.5],      # loose branch1, medium branch2, tight projection
+        "2p": [1.5, 0.5],            # loose hop1, tight hop2 (final)
+        "2i": [1.5, 1.5],            # intersection: keep both branches permissive
+        "3i": [1.5, 1.5, 1.5],       # 3-way intersection: all branches permissive
+        "pi": [1.5, 1.0, 0.5],       # chain_hop1 loose, chain_hop2 medium, branch_1p tight
+        "up": [1.5, 1.5, 0.5],       # branch1/branch2 loose (union is permissive), projection tight
     },
     "tight_early_loose_late": {
         "3p": [0.5, 1.0, 1.5],       # tight hop1, medium hop2, loose hop3
         "2u": [0.5, 0.5],            # tight branch1, loose branch2
         "2ip": [0.5, 0.5, 1.5],      # tight branch1, medium branch2, loose projection
+        "2p": [0.5, 1.5],
+        "2i": [0.5, 0.5],            # intersection: both branches tight
+        "3i": [0.5, 0.5, 0.5],
+        "pi": [0.5, 1.0, 1.5],
+        "up": [0.5, 0.5, 1.5],
     },
     "balanced_tight": {
         "3p": [0.7, 0.7, 0.7],
         "2u": [0.7, 0.7],
         "2ip": [0.7, 0.7, 0.7],
+        "2p": [0.7, 0.7],
+        "2i": [0.7, 0.7],
+        "3i": [0.7, 0.7, 0.7],
+        "pi": [0.7, 0.7, 0.7],
+        "up": [0.7, 0.7, 0.7],
     },
     "balanced_loose": {
         "3p": [1.5, 1.5, 1.5],
         "2u": [1.5, 1.5],
         "2ip": [1.5, 1.5, 1.5],
+        "2p": [1.5, 1.5],
+        "2i": [1.5, 1.5],
+        "3i": [1.5, 1.5, 1.5],
+        "pi": [1.5, 1.5, 1.5],
+        "up": [1.5, 1.5, 1.5],
     },
     "quantile_neutral": {
         "3p": "raw_quantile",
         "2u": "raw_quantile",
         "2ip": "raw_quantile",
+        "2p": "raw_quantile",
+        "2i": "raw_quantile",
+        "3i": "raw_quantile",
+        "pi": "raw_quantile",
+        "up": "raw_quantile",
     },
 }
 # Backward compatibility: 'quantile' -> quantile_neutral
@@ -78,9 +108,57 @@ QUERY_TYPE_CONFIG = {
         'k': 3,
         'component_keys': ['branch1', 'branch2', 'projection'],
         'component_type': 'intersect_project',
-        'has_path_dependencies': True, 
+        'has_path_dependencies': True,
         'final_component_idx': 3,  # Ground truth uses key 3 (or 'final') for final projection results
         'description': '2-intersect-project queries with 3D optimization: τ_branch1, τ_branch2 for independent branch pruning, τ_proj for projection'
+    },
+    '2p': {
+        'k': 2,
+        'component_keys': ['hop1', 'hop2'],
+        'component_type': 'hop',
+        'has_path_dependencies': True,
+        'final_component_idx': 2,  # GT key for the final hop
+        'description': '2-hop queries with sequential path dependencies'
+    },
+    '2i': {
+        'k': 2,
+        'component_keys': ['branch1', 'branch2'],
+        'component_type': 'branch',
+        'has_path_dependencies': False,
+        # GT comes from the top-level answers.pkl (= branch1 ∩ branch2). Using the
+        # legacy None / int code paths would give us the union or a single hop,
+        # both of which are wrong for intersection-final topologies.
+        'final_component_idx': 'final',
+        'description': '2-way intersection queries with independent branches'
+    },
+    '3i': {
+        'k': 3,
+        'component_keys': ['branch1', 'branch2', 'branch3'],
+        'component_type': 'branch',
+        'has_path_dependencies': False,
+        'final_component_idx': 'final',  # branch1 ∩ branch2 ∩ branch3, from answers.pkl
+        'description': '3-way intersection queries with three independent branches'
+    },
+    'pi': {
+        'k': 3,
+        # chain_hop2 is a list-of-paths whose parents live in chain_hop1.nodes;
+        # branch_1p is an independent 1-hop projection.
+        'component_keys': ['chain_hop1', 'chain_hop2', 'branch_1p'],
+        'component_type': 'project_intersect',
+        'has_path_dependencies': True,
+        'final_component_idx': 'final',  # chain_result ∩ branch_1p, from answers.pkl
+        'description': 'project-intersect: 2-hop chain (anchor1→rel1→rel2) intersected with 1-hop branch (anchor2→rel3)'
+    },
+    'up': {
+        # Mirrors 2ip's component layout: branch1/branch2 are independent 1-hop
+        # projections; "projection" carries the MAX-aggregated projection scores
+        # built from projection_paths in calibration_data_generator._extract_2ip_scores.
+        'k': 3,
+        'component_keys': ['branch1', 'branch2', 'projection'],
+        'component_type': 'union_project',
+        'has_path_dependencies': True,
+        'final_component_idx': 'final',  # projection-of-union, from answers.pkl
+        'description': 'union-project: union of two 1-hop projections, then projected through rel3'
     },
 }
 
@@ -166,6 +244,26 @@ class VectorOptimizer:
             from models.topology.model import TwoIntersectProjectPipeline
             self.pipeline_model = TwoIntersectProjectPipeline
             logging.info("Using TwoIntersectProjectPipeline for 2ip queries")
+        elif self.query_type == '2p':
+            from models.topology.model import TwoHopPipeline
+            self.pipeline_model = TwoHopPipeline
+            logging.info("Using TwoHopPipeline for 2p queries")
+        elif self.query_type == '2i':
+            from models.topology.model import TwoIntersectPipeline
+            self.pipeline_model = TwoIntersectPipeline
+            logging.info("Using TwoIntersectPipeline for 2i queries")
+        elif self.query_type == '3i':
+            from models.topology.model import ThreeIntersectPipeline
+            self.pipeline_model = ThreeIntersectPipeline
+            logging.info("Using ThreeIntersectPipeline for 3i queries")
+        elif self.query_type == 'pi':
+            from models.topology.model import ProjectIntersectPipeline
+            self.pipeline_model = ProjectIntersectPipeline
+            logging.info("Using ProjectIntersectPipeline for pi queries")
+        elif self.query_type == 'up':
+            from models.topology.model import UnionProjectPipeline
+            self.pipeline_model = UnionProjectPipeline
+            logging.info("Using UnionProjectPipeline for up queries")
         else:
             raise ValueError(f"No default pipeline model for query type '{self.query_type}'")
 
@@ -540,11 +638,17 @@ class VectorOptimizer:
         }
 
     def _extract_ground_truth_from_labels(self, labels: List[Dict]) -> List[List[int]]:
-        """Extract ground truth entity lists from label dicts (for eval set)."""
+        """Extract ground truth entity lists from label dicts (for eval set).
+
+        Mirrors the three modes documented on _extract_ground_truth.
+        """
         ground_truth = []
         for label in labels:
             if isinstance(label, dict):
-                if self.final_component_idx is None:
+                if self.final_component_idx == "final":
+                    raw = label.get("final", [])
+                    gt_entities = list(raw) if isinstance(raw, set) else raw
+                elif self.final_component_idx is None:
                     branch1 = set(label.get(1, []))
                     branch2 = set(label.get(2, []))
                     gt_entities = list(branch1 | branch2)
@@ -734,29 +838,36 @@ class VectorOptimizer:
     def _extract_ground_truth(self) -> List[List[int]]:
         """
         Extract ground truth labels for FNR computation.
-        
-        For union queries (final_component_idx=None), computes union of branches 1 and 2.
-        For other queries, extracts from the specified component index.
-        
+
+        Three modes:
+          - final_component_idx == "final": read the canonical final answer that
+            the dataloader injects from answers.pkl. Used by 2i/3i/pi/up where
+            the true answer is not directly a single saved hop (intersection or
+            project-over-union).
+          - final_component_idx is None: legacy union-of-branches (correct for 2u).
+          - final_component_idx is an int: legacy single-hop lookup (3p/2ip/2p).
+
         Returns:
             List of ground truth entity lists (one per query)
         """
         ground_truth = []
         for idx, label in enumerate(self.true_labels):
             if isinstance(label, dict):
-                if self.final_component_idx is None:
-                    # For union queries: compute union of branches 1 and 2
+                if self.final_component_idx == "final":
+                    raw = label.get("final", [])
+                    gt_entities = list(raw) if isinstance(raw, set) else raw
+                elif self.final_component_idx is None:
+                    # 2u: union of branches 1 and 2
                     branch1 = set(label.get(1, []))
                     branch2 = set(label.get(2, []))
                     gt_entities = list(branch1 | branch2)
                 else:
-                    # For other queries: extract from specified component
                     gt_entities = label.get(self.final_component_idx, [])
             elif isinstance(label, (list, set)):
                 gt_entities = list(label) if isinstance(label, set) else label
             else:
                 gt_entities = []
-            
+
             ground_truth.append(gt_entities)
-        
+
         return ground_truth

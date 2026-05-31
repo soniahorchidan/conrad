@@ -86,6 +86,11 @@ import time
 from sampler.sampler_3p import generate_3p_queries, build_ent_out_structure
 from sampler.sampler_2ip import generate_2ip_queries
 from sampler.sampler_2u import generate_2u_queries
+from sampler.sampler_2p import generate_2p_queries
+from sampler.sampler_2i import generate_2i_queries
+from sampler.sampler_3i import generate_3i_queries
+from sampler.sampler_pi import generate_pi_queries
+from sampler.sampler_up import generate_up_queries
 import random
 
 
@@ -104,6 +109,10 @@ def format_query_string(query, query_type):
         # Format: (entity, (rel1, rel2, rel3))
         entity_id, rel_types = query
         return f"query(({entity_id}, ({', '.join(map(str, rel_types))})))"
+    elif query_type == "2p":
+        # Format: (entity, (rel1, rel2))
+        entity_id, rel_types = query
+        return f"query(({entity_id}, ({', '.join(map(str, rel_types))})))"
     elif query_type == "2ip":
         # Format: ((anchor1, rel1), (anchor2, rel2), rel3, "2ip")
         (anchor1, rel1), (anchor2, rel2), rel3, _ = query
@@ -112,6 +121,22 @@ def format_query_string(query, query_type):
         # Format: ((anchor1, rel1), (anchor2, rel2), "2u")
         (anchor1, rel1), (anchor2, rel2), _ = query
         return f"query((({anchor1}, {rel1}), ({anchor2}, {rel2}), '2u'))"
+    elif query_type == "2i":
+        # Format: ((anchor1, rel1), (anchor2, rel2), "2i")
+        (anchor1, rel1), (anchor2, rel2), _ = query
+        return f"query((({anchor1}, {rel1}), ({anchor2}, {rel2}), '2i'))"
+    elif query_type == "3i":
+        # Format: ((anchor1, rel1), (anchor2, rel2), (anchor3, rel3), "3i")
+        (anchor1, rel1), (anchor2, rel2), (anchor3, rel3), _ = query
+        return f"query((({anchor1}, {rel1}), ({anchor2}, {rel2}), ({anchor3}, {rel3}), '3i'))"
+    elif query_type == "pi":
+        # Format: ((anchor1, rel1, rel2), (anchor2, rel3), "pi")
+        (anchor1, rel1, rel2), (anchor2, rel3), _ = query
+        return f"query((({anchor1}, {rel1}, {rel2}), ({anchor2}, {rel3}), 'pi'))"
+    elif query_type == "up":
+        # Format: ((anchor1, rel1), (anchor2, rel2), rel3, "up")
+        (anchor1, rel1), (anchor2, rel2), rel3, _ = query
+        return f"query((({anchor1}, {rel1}), ({anchor2}, {rel2}), {rel3}, 'up'))"
     else:
         raise ValueError(f"Unknown query type: {query_type}")
 
@@ -209,7 +234,7 @@ def split_and_save_queries(
         logging.info(f"  Calibration data saved to: {calib_path}")
 
 
-def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_queries_per_hop=1000, size_ratio=0.1, min_hops=3, max_hops=3, extract_intermediate=True, max_hop_size=50, generate_3hop=True, generate_2ip=False, generate_2u=False, num_2ip_queries=1000, num_2u_queries=1000, calib_path="./calibration_data", calib_split=None, test_path=None):
+def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_queries_per_hop=1000, size_ratio=0.1, min_hops=3, max_hops=3, extract_intermediate=True, max_hop_size=50, generate_3hop=True, generate_2ip=False, generate_2u=False, generate_2p=False, generate_2i=False, generate_3i=False, generate_pi=False, generate_up=False, num_2ip_queries=1000, num_2u_queries=1000, num_2p_queries=1000, num_2i_queries=1000, num_3i_queries=1000, num_pi_queries=1000, num_up_queries=1000, calib_path="./calibration_data", calib_split=None, test_path=None):
     """
     Sample calibration data from the database and save to disk.
     
@@ -230,8 +255,8 @@ def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_qu
                              If None, all queries go to calibration data.
         test_path (str): Output directory for test queries (required if calib_split is specified)
     """
-    if not generate_3hop and not generate_2ip and not generate_2u:
-        raise ValueError("At least one of --generate-3p, --generate-2ip, or --generate-2u must be enabled")
+    if not any([generate_3hop, generate_2ip, generate_2u, generate_2p, generate_2i, generate_3i, generate_pi, generate_up]):
+        raise ValueError("At least one query type generation flag must be enabled")
     
     if calib_split is not None and test_path is None:
         raise ValueError("--test-path must be specified when --calib-split is provided")
@@ -242,10 +267,20 @@ def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_qu
     logging.info("Starting calibration data sampling...")
     if generate_3hop:
         logging.info(f"Will generate {num_queries_per_hop} 3p queries")
+    if generate_2p:
+        logging.info(f"Will generate {num_2p_queries} 2p queries")
     if generate_2ip:
         logging.info(f"Will generate {num_2ip_queries} 2ip queries")
     if generate_2u:
         logging.info(f"Will generate {num_2u_queries} 2u queries")
+    if generate_2i:
+        logging.info(f"Will generate {num_2i_queries} 2i queries")
+    if generate_3i:
+        logging.info(f"Will generate {num_3i_queries} 3i queries")
+    if generate_pi:
+        logging.info(f"Will generate {num_pi_queries} pi queries")
+    if generate_up:
+        logging.info(f"Will generate {num_up_queries} up queries")
     if max_hop_size is not None:
         logging.info(f"Max intermediate set size: {max_hop_size} nodes (applies to all query types)")
     
@@ -255,7 +290,7 @@ def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_qu
     device = "cpu"  # or "cuda" if available
     
     # Initialize database controller
-    neo4j_uri = f"bolt://${neo4j_host}:${neo4j_bolt_port}"
+    neo4j_uri = f"bolt://{neo4j_host}:{neo4j_bolt_port}"
     logging.info(f"Connecting to Neo4j at: {neo4j_uri}")
     db_controller = Neo4JBackendDBController(
         uri=neo4j_uri,
@@ -496,7 +531,253 @@ def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_qu
             logging.warning("Continuing without 2u queries...")
     
     logging.info("="*60)
-    
+
+    # Generate 2p queries if requested
+    if generate_2p:
+        logging.info("Generating 2p (2-hop traversal) queries...")
+        try:
+            final_2p_path = os.path.join(calib_path, "2p_pipeline")
+            queries_2p, answers_2p, intermediate_hop_results_2p = generate_2p_queries(
+                graph_data,
+                num_queries_per_hop=num_2p_queries,
+                size_ratio=size_ratio,
+                extract_intermediate=extract_intermediate,
+                max_answers=max_hop_size,
+                max_hop_size=max_hop_size,
+                save_path=None,
+            )
+            logging.info(f"Generated {len(queries_2p)} 2p queries")
+            if calib_split is not None and test_path is not None:
+                split_and_save_queries(queries_2p, answers_2p, "2p", calib_split,
+                                       final_2p_path, os.path.join(test_path, "2p_pipeline"),
+                                       intermediate_hop_results_2p)
+            else:
+                split_and_save_queries(queries_2p, answers_2p, "2p", 1.0, final_2p_path, None,
+                                       intermediate_hop_results_2p)
+            metadata_2p = {
+                "query_type": "2p",
+                "num_queries": len(queries_2p),
+                "num_answers": sum(len(ans) for ans in answers_2p.values()),
+                "graph_num_nodes": graph_data.num_nodes,
+                "graph_num_edges": graph_data.num_edges,
+                "max_hop_size": max_hop_size,
+            }
+            with open(os.path.join(final_2p_path, "metadata.pkl"), "wb") as f:
+                pickle.dump(metadata_2p, f)
+            logging.info(f"2p queries saved to: {final_2p_path}")
+        except Exception as e:
+            logging.warning(f"Failed to generate 2p queries: {e}")
+            logging.warning("Continuing without 2p queries...")
+
+    logging.info("="*60)
+
+    # Generate 2i queries if requested
+    if generate_2i:
+        logging.info("Generating 2i (2-way intersection) queries...")
+        try:
+            final_2i_path = os.path.join(calib_path, "2i_pipeline")
+            queries_2i, answers_2i = generate_2i_queries(
+                graph_data,
+                num_queries=num_2i_queries,
+                max_answers=max_hop_size,
+                min_answers=1,
+                max_hop_size=max_hop_size,
+                save_path=None,
+            )
+            logging.info(f"Generated {len(queries_2i)} 2i queries")
+
+            intermediate_hop_results_2i = None
+            if extract_intermediate:
+                ent_out = build_ent_out_structure(graph_data)
+                if ent_out is not None:
+                    intermediate_hop_results_2i = {1: {}, 2: {}}
+                    for q in queries_2i:
+                        (anchor1, rel1), (anchor2, rel2), _ = q
+                        set1 = ent_out.get(anchor1, {}).get(rel1, set()).copy()
+                        set2 = ent_out.get(anchor2, {}).get(rel2, set()).copy()
+                        intermediate_hop_results_2i[1][q] = set1
+                        intermediate_hop_results_2i[2][q] = set2
+
+            if calib_split is not None and test_path is not None:
+                split_and_save_queries(queries_2i, answers_2i, "2i", calib_split,
+                                       final_2i_path, os.path.join(test_path, "2i_pipeline"),
+                                       intermediate_hop_results_2i)
+            else:
+                split_and_save_queries(queries_2i, answers_2i, "2i", 1.0, final_2i_path, None,
+                                       intermediate_hop_results_2i)
+            metadata_2i = {
+                "query_type": "2i",
+                "num_queries": len(queries_2i),
+                "num_answers": sum(len(ans) for ans in answers_2i.values()),
+                "graph_num_nodes": graph_data.num_nodes,
+                "graph_num_edges": graph_data.num_edges,
+                "max_hop_size": max_hop_size,
+                "min_answers": 1,
+            }
+            with open(os.path.join(final_2i_path, "metadata.pkl"), "wb") as f:
+                pickle.dump(metadata_2i, f)
+            logging.info(f"2i queries saved to: {final_2i_path}")
+        except Exception as e:
+            logging.warning(f"Failed to generate 2i queries: {e}")
+            logging.warning("Continuing without 2i queries...")
+
+    logging.info("="*60)
+
+    # Generate 3i queries if requested
+    if generate_3i:
+        logging.info("Generating 3i (3-way intersection) queries...")
+        try:
+            final_3i_path = os.path.join(calib_path, "3i_pipeline")
+            queries_3i, answers_3i = generate_3i_queries(
+                graph_data,
+                num_queries=num_3i_queries,
+                max_answers=max_hop_size,
+                min_answers=1,
+                max_hop_size=max_hop_size,
+                save_path=None,
+            )
+            logging.info(f"Generated {len(queries_3i)} 3i queries")
+
+            intermediate_hop_results_3i = None
+            if extract_intermediate:
+                ent_out = build_ent_out_structure(graph_data)
+                if ent_out is not None:
+                    intermediate_hop_results_3i = {1: {}, 2: {}, 3: {}}
+                    for q in queries_3i:
+                        (anchor1, rel1), (anchor2, rel2), (anchor3, rel3), _ = q
+                        intermediate_hop_results_3i[1][q] = ent_out.get(anchor1, {}).get(rel1, set()).copy()
+                        intermediate_hop_results_3i[2][q] = ent_out.get(anchor2, {}).get(rel2, set()).copy()
+                        intermediate_hop_results_3i[3][q] = ent_out.get(anchor3, {}).get(rel3, set()).copy()
+
+            if calib_split is not None and test_path is not None:
+                split_and_save_queries(queries_3i, answers_3i, "3i", calib_split,
+                                       final_3i_path, os.path.join(test_path, "3i_pipeline"),
+                                       intermediate_hop_results_3i)
+            else:
+                split_and_save_queries(queries_3i, answers_3i, "3i", 1.0, final_3i_path, None,
+                                       intermediate_hop_results_3i)
+            metadata_3i = {
+                "query_type": "3i",
+                "num_queries": len(queries_3i),
+                "num_answers": sum(len(ans) for ans in answers_3i.values()),
+                "graph_num_nodes": graph_data.num_nodes,
+                "graph_num_edges": graph_data.num_edges,
+                "max_hop_size": max_hop_size,
+                "min_answers": 1,
+            }
+            with open(os.path.join(final_3i_path, "metadata.pkl"), "wb") as f:
+                pickle.dump(metadata_3i, f)
+            logging.info(f"3i queries saved to: {final_3i_path}")
+        except Exception as e:
+            logging.warning(f"Failed to generate 3i queries: {e}")
+            logging.warning("Continuing without 3i queries...")
+
+    logging.info("="*60)
+
+    # Generate pi queries if requested
+    if generate_pi:
+        logging.info("Generating pi (project-intersect) queries...")
+        try:
+            final_pi_path = os.path.join(calib_path, "pi_pipeline")
+            queries_pi, answers_pi = generate_pi_queries(
+                graph_data,
+                num_queries=num_pi_queries,
+                max_answers=max_hop_size,
+                min_answers=1,
+                max_hop_size=max_hop_size,
+                save_path=None,
+            )
+            logging.info(f"Generated {len(queries_pi)} pi queries")
+
+            intermediate_hop_results_pi = None
+            if extract_intermediate:
+                from sampler.sampler_pi import execute_chain
+                ent_out = build_ent_out_structure(graph_data)
+                if ent_out is not None:
+                    intermediate_hop_results_pi = {1: {}, 2: {}, 3: {}}
+                    for q in queries_pi:
+                        (anchor1, rel1, rel2), (anchor2, rel3), _ = q
+                        intermediates, chain_result = execute_chain(anchor1, rel1, rel2, ent_out)
+                        branch_1p = ent_out.get(anchor2, {}).get(rel3, set()).copy()
+                        intermediate_hop_results_pi[1][q] = intermediates
+                        intermediate_hop_results_pi[2][q] = chain_result
+                        intermediate_hop_results_pi[3][q] = branch_1p
+
+            if calib_split is not None and test_path is not None:
+                split_and_save_queries(queries_pi, answers_pi, "pi", calib_split,
+                                       final_pi_path, os.path.join(test_path, "pi_pipeline"),
+                                       intermediate_hop_results_pi)
+            else:
+                split_and_save_queries(queries_pi, answers_pi, "pi", 1.0, final_pi_path, None,
+                                       intermediate_hop_results_pi)
+            metadata_pi = {
+                "query_type": "pi",
+                "num_queries": len(queries_pi),
+                "num_answers": sum(len(ans) for ans in answers_pi.values()),
+                "graph_num_nodes": graph_data.num_nodes,
+                "graph_num_edges": graph_data.num_edges,
+                "max_hop_size": max_hop_size,
+                "min_answers": 1,
+            }
+            with open(os.path.join(final_pi_path, "metadata.pkl"), "wb") as f:
+                pickle.dump(metadata_pi, f)
+            logging.info(f"pi queries saved to: {final_pi_path}")
+        except Exception as e:
+            logging.warning(f"Failed to generate pi queries: {e}")
+            logging.warning("Continuing without pi queries...")
+
+    logging.info("="*60)
+
+    # Generate up queries if requested
+    if generate_up:
+        logging.info("Generating up (union-project) queries...")
+        try:
+            final_up_path = os.path.join(calib_path, "up_pipeline")
+            queries_up, answers_up = generate_up_queries(
+                graph_data,
+                num_queries=num_up_queries,
+                max_answers=max_hop_size,
+                min_answers=1,
+                max_hop_size=max_hop_size,
+                save_path=None,
+            )
+            logging.info(f"Generated {len(queries_up)} up queries")
+
+            intermediate_hop_results_up = None
+            if extract_intermediate:
+                ent_out = build_ent_out_structure(graph_data)
+                if ent_out is not None:
+                    intermediate_hop_results_up = {1: {}, 2: {}}
+                    for q in queries_up:
+                        (anchor1, rel1), (anchor2, rel2), rel3, _ = q
+                        intermediate_hop_results_up[1][q] = ent_out.get(anchor1, {}).get(rel1, set()).copy()
+                        intermediate_hop_results_up[2][q] = ent_out.get(anchor2, {}).get(rel2, set()).copy()
+
+            if calib_split is not None and test_path is not None:
+                split_and_save_queries(queries_up, answers_up, "up", calib_split,
+                                       final_up_path, os.path.join(test_path, "up_pipeline"),
+                                       intermediate_hop_results_up)
+            else:
+                split_and_save_queries(queries_up, answers_up, "up", 1.0, final_up_path, None,
+                                       intermediate_hop_results_up)
+            metadata_up = {
+                "query_type": "up",
+                "num_queries": len(queries_up),
+                "num_answers": sum(len(ans) for ans in answers_up.values()),
+                "graph_num_nodes": graph_data.num_nodes,
+                "graph_num_edges": graph_data.num_edges,
+                "max_hop_size": max_hop_size,
+                "min_answers": 1,
+            }
+            with open(os.path.join(final_up_path, "metadata.pkl"), "wb") as f:
+                pickle.dump(metadata_up, f)
+            logging.info(f"up queries saved to: {final_up_path}")
+        except Exception as e:
+            logging.warning(f"Failed to generate up queries: {e}")
+            logging.warning("Continuing without up queries...")
+
+    logging.info("="*60)
+
     # Save graph_data once at the shared location (reused by all query types)
     shared_graph_path = os.path.join(calib_path, "graph_data.pkl")
     if not os.path.exists(shared_graph_path):
@@ -512,10 +793,20 @@ def sample_calibration_data(neo4j_host="localhost", neo4j_bolt_port=7687, num_qu
     paths = {}
     if generate_3hop:
         paths["3p_path"] = os.path.join(calib_path, "3p_pipeline")
+    if generate_2p:
+        paths["2p_path"] = os.path.join(calib_path, "2p_pipeline")
     if generate_2ip:
         paths["2ip_path"] = os.path.join(calib_path, "2ip_pipeline")
     if generate_2u:
         paths["2u_path"] = os.path.join(calib_path, "2u_pipeline")
+    if generate_2i:
+        paths["2i_path"] = os.path.join(calib_path, "2i_pipeline")
+    if generate_3i:
+        paths["3i_path"] = os.path.join(calib_path, "3i_pipeline")
+    if generate_pi:
+        paths["pi_path"] = os.path.join(calib_path, "pi_pipeline")
+    if generate_up:
+        paths["up_path"] = os.path.join(calib_path, "up_pipeline")
     
     if len(paths) == 1:
         return list(paths.values())[0]
@@ -548,14 +839,34 @@ def main():
                         help='Skip intermediate hop extraction for faster processing')
     parser.add_argument('--generate-3p', '-3p', action='store_true', default=False,
                         help='Generate 3p (3-hop traversal) queries')
+    parser.add_argument('--generate-2p', '-2p', action='store_true', default=False,
+                        help='Generate 2p (2-hop traversal) queries')
     parser.add_argument('--generate-2ip', '-2ip', action='store_true', default=False,
                         help='Generate 2ip (Intersection-followed-by-Projection) queries')
     parser.add_argument('--generate-2u', '-2u', action='store_true', default=False,
                         help='Generate 2u (Union) queries')
+    parser.add_argument('--generate-2i', '-2i', action='store_true', default=False,
+                        help='Generate 2i (2-way intersection) queries')
+    parser.add_argument('--generate-3i', '-3i', action='store_true', default=False,
+                        help='Generate 3i (3-way intersection) queries')
+    parser.add_argument('--generate-pi', '-pi', action='store_true', default=False,
+                        help='Generate pi (project-intersect) queries')
+    parser.add_argument('--generate-up', '-up', action='store_true', default=False,
+                        help='Generate up (union-project) queries')
     parser.add_argument('--num-2ip-queries', type=int, default=1000,
-                        help='Number of 2ip queries to generate (default: 1000, only used if --generate-2ip is set)')
+                        help='Number of 2ip queries to generate (default: 1000)')
     parser.add_argument('--num-2u-queries', type=int, default=1000,
-                        help='Number of 2u queries to generate (default: 1000, only used if --generate-2u is set)')
+                        help='Number of 2u queries to generate (default: 1000)')
+    parser.add_argument('--num-2p-queries', type=int, default=1000,
+                        help='Number of 2p queries to generate (default: 1000)')
+    parser.add_argument('--num-2i-queries', type=int, default=1000,
+                        help='Number of 2i queries to generate (default: 1000)')
+    parser.add_argument('--num-3i-queries', type=int, default=1000,
+                        help='Number of 3i queries to generate (default: 1000)')
+    parser.add_argument('--num-pi-queries', type=int, default=1000,
+                        help='Number of pi queries to generate (default: 1000)')
+    parser.add_argument('--num-up-queries', type=int, default=1000,
+                        help='Number of up queries to generate (default: 1000)')
     parser.add_argument('--calib-path', type=str, default='./calibration_data',
                         help='Base path to save calibration data (default: ./calibration_data)')
     parser.add_argument('--calib-split', type=float, default=None,
@@ -570,7 +881,11 @@ def main():
         args.extract_intermediate = False
     
     # If no query type specified, default to 3p for backward compatibility
-    if not args.generate_3p and not args.generate_2ip and not args.generate_2u:
+    _any_generate = any([
+        args.generate_3p, args.generate_2p, args.generate_2ip, args.generate_2u,
+        args.generate_2i, args.generate_3i, args.generate_pi, args.generate_up,
+    ])
+    if not _any_generate:
         logging.warning("No query type specified, defaulting to 3p queries for backward compatibility")
         args.generate_3p = True
     
@@ -596,13 +911,23 @@ def main():
             extract_intermediate=args.extract_intermediate,
             max_hop_size=args.max_hop_size,
             generate_3hop=args.generate_3p,
+            generate_2p=args.generate_2p,
             generate_2ip=args.generate_2ip,
             generate_2u=args.generate_2u,
+            generate_2i=args.generate_2i,
+            generate_3i=args.generate_3i,
+            generate_pi=args.generate_pi,
+            generate_up=args.generate_up,
             num_2ip_queries=args.num_2ip_queries,
             num_2u_queries=args.num_2u_queries,
+            num_2p_queries=args.num_2p_queries,
+            num_2i_queries=args.num_2i_queries,
+            num_3i_queries=args.num_3i_queries,
+            num_pi_queries=args.num_pi_queries,
+            num_up_queries=args.num_up_queries,
             calib_path=args.calib_path,
             calib_split=args.calib_split,
-            test_path=args.test_path
+            test_path=args.test_path,
         )
         
         if isinstance(calibration_data_path, dict):

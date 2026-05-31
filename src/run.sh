@@ -3,13 +3,21 @@
 set -euo pipefail
 
 # Configuration
-INCOMPLETENESS_LEVELS=(20 5 40)
+INCOMPLETENESS_LEVELS=(20)
+# DATASETS=("fb15k-237" "nell-955" "yago310")
 DATASETS=("fb15k-237" "nell-955" "yago310")
+
 # Vector CRC
-MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
-# Non Vector CRC
-# MODELS=("NonVector3HopNeural")
-BASELINE_TYPES=("neural" "symbolic" "hybrid") # unused
+# MODELS=("TwoUnionPipeline" "ThreeHopPipeline" "TwoIntersectProjectPipeline")
+
+MODELS=("UnionProjectPipeline")
+
+
+# Edge deletion strategy for synthetic incompleteness.
+# - uniform:    every edge has the same removal probability (original setting)
+# - stratified: edges binned by min-endpoint-degree; low-degree edges are
+#               removed at a higher rate, modelling long-tail KG incompleteness
+DELETION_STRATEGY="${DELETION_STRATEGY:-uniform}"
 
 # Threshold configurations
 NEURAL_THRESHOLDS=(0.7 0.8 0.9 0.99)
@@ -20,14 +28,15 @@ CONFIDENCE_LEVELS=(0.6 0.7 0.8 0.9)
 MAX_EVAL_QUERIES=2000
 
 # Neo4j Instance
-# NEO4J_HOST=localhost
-# NEO4J_BOLT_PORT=7688
+NEO4J_HOST="${NEO4J_HOST:-localhost}"
+NEO4J_BOLT_PORT="${NEO4J_BOLT_PORT:-7687}"
 
 # Model-specific calibration batch sizes (increased for better GPU utilization)
 declare -A CALIB_BATCH_SIZES=(
     ["ThreeHopPipeline"]=64
     ["TwoUnionPipeline"]=64
     ["TwoIntersectProjectPipeline"]=64
+    ["UnionProjectPipeline"]=64
     ["NonVector3HopNeural"]=64
 )
 
@@ -69,6 +78,7 @@ log INFO "Starting comprehensive benchmark sweep"
 log INFO "Incompleteness levels: ${INCOMPLETENESS_LEVELS[*]}"
 log INFO "Datasets: ${DATASETS[*]}"
 log INFO "Models: ${MODELS[*]}"
+log INFO "Deletion strategy: ${DELETION_STRATEGY}"
 
 for dataset in "${DATASETS[@]}"; do
     log INFO "=========================================="
@@ -100,8 +110,8 @@ for dataset in "${DATASETS[@]}"; do
         # Generate calibration data for this dataset and incompleteness level
         # Must run from REPO_ROOT so build.sh (invoked by generate_calibration.sh) finds ./artifacts/data/
         cd "${REPO_ROOT}"
-        log INFO "Generating calibration data for ${dataset} with ${incompleteness}% incompleteness"
-        if ! bash "${GENERATE_CALIBRATION_SCRIPT}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}" --dataset "${dataset}" --delete-edges-perc "${incompleteness}"; then
+        log INFO "Generating calibration data for ${dataset} with ${incompleteness}% incompleteness (${DELETION_STRATEGY})"
+        if ! bash "${GENERATE_CALIBRATION_SCRIPT}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}" --dataset "${dataset}" --delete-edges-perc "${incompleteness}" --deletion-strategy "${DELETION_STRATEGY}"; then
             log ERROR "Failed to generate calibration data for ${dataset} with ${incompleteness}% incompleteness"
             exit 1
         fi
@@ -247,7 +257,7 @@ for dataset in "${DATASETS[@]}"; do
         #         log INFO "All baseline benchmarks completed for ${model}"
         #     fi
         done
-        
+
         log INFO "Completed all models for ${dataset} (incompleteness: ${incompleteness}%)"
     done
     

@@ -79,15 +79,21 @@ class BaselineRunner:
         self.use_ultraquery = use_ultraquery
         
         # Detect template from directory name (more reliable than query string)
-        if query_dir.endswith("3p_pipeline"):
-            self.template_from_dir = "3p"
-        elif query_dir.endswith("2u_pipeline"):
-            self.template_from_dir = "2u"
-        elif query_dir.endswith("2ip_pipeline"):
-            self.template_from_dir = "2ip"
-        else:
-            # Fallback to query string detection
-            self.template_from_dir = None
+        dir_template_map = {
+            "3p_pipeline": "3p",
+            "2u_pipeline": "2u",
+            "2ip_pipeline": "2ip",
+            "2p_pipeline": "2p",
+            "2i_pipeline": "2i",
+            "3i_pipeline": "3i",
+            "pi_pipeline": "pi",
+            "up_pipeline": "up",
+        }
+        self.template_from_dir = None
+        for suffix, tpl in dir_template_map.items():
+            if query_dir.endswith(suffix):
+                self.template_from_dir = tpl
+                break
         
         # Results storage
         self.results = {
@@ -112,29 +118,38 @@ class BaselineRunner:
     
     def detect_query_template(self, query: str) -> str:
         """Detect query template type from query string."""
-        if "'2u'" in query or '"2u"' in query:
-            return "2u"
-        elif "'2ip'" in query or '"2ip"' in query:
-            return "2ip"
-        else:
-            return "3p"
-    
+        # Look for explicit template tags first (most specific wins).
+        # Order matters: "2ip" must be checked before "2i", "up" must be checked
+        # before "pi" / "p" patterns.
+        for tag in ("2ip", "2u", "3i", "2i", "pi", "up"):
+            if f"'{tag}'" in query or f'"{tag}"' in query:
+                return tag
+        # No tag → traversal query. Count relations to disambiguate 2p vs 3p.
+        # 2p:  query((eid, (r1, r2)))     → 2 relation ints
+        # 3p:  query((eid, (r1, r2, r3))) → 3 relation ints
+        inner = re.search(r'query\(\(\d+,\s*\(([^)]*)\)\)\)', query)
+        if inner:
+            n_rels = len([x for x in inner.group(1).split(',') if x.strip()])
+            if n_rels == 2:
+                return "2p"
+        return "3p"
+
     def parse_query(self, query: str) -> Tuple:
         """Parse query string based on template type.
-        
-        Returns:
-            - For 3p: (entity_id, [rel1, rel2, rel3])
-            - For 2u: (anchor1, rel1, anchor2, rel2)
-            - For 2ip: (anchor1, rel1, anchor2, rel2, rel3)
+
+        Returns parsed query fields; the per-template parsers describe shape.
         """
         template = self.detect_query_template(query)
-        
-        if template == "2u":
-            return self.parse_query_2u(query)
-        elif template == "2ip":
-            return self.parse_query_2ip(query)
-        else:
-            return self.parse_query_3p(query)
+        parsers = {
+            "2u":  self.parse_query_2u,
+            "2ip": self.parse_query_2ip,
+            "2p":  self.parse_query_2p,
+            "2i":  self.parse_query_2i,
+            "3i":  self.parse_query_3i,
+            "pi":  self.parse_query_pi,
+            "up":  self.parse_query_up,
+        }
+        return parsers.get(template, self.parse_query_3p)(query)
     
     def parse_query_3p(self, query: str) -> Tuple[int, List[int]]:
         """Parse 3p query: query((entity_id, (rel1, rel2, rel3)))"""
@@ -176,9 +191,71 @@ class BaselineRunner:
         # Match: query(((anchor1, rel1), (anchor2, rel2), rel3, '2ip'))
         match = re.search(r'query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*(\d+),\s*[\'"]2ip[\'"]\)\)', query)
         if match:
-            return (int(match.group(1)), int(match.group(2)), 
+            return (int(match.group(1)), int(match.group(2)),
                    int(match.group(3)), int(match.group(4)), int(match.group(5)))
         raise ValueError(f"Could not parse 2ip query: {query}")
+
+    def parse_query_2p(self, query: str) -> Tuple[int, List[int]]:
+        """Parse 2p query: query((entity_id, (rel1, rel2)))"""
+        m = re.search(r'query\(\((\d+),\s*\(([0-9,\s]+)\)\)\)', query)
+        if not m:
+            raise ValueError(f"Could not parse 2p query: {query}")
+        entity_id = int(m.group(1))
+        rel_types = [int(r.strip()) for r in m.group(2).split(',') if r.strip()]
+        if len(rel_types) != 2:
+            raise ValueError(f"Expected 2 relations for 2p, got {len(rel_types)}: {query}")
+        return entity_id, rel_types
+
+    def parse_query_2i(self, query: str) -> Tuple[int, int, int, int]:
+        """Parse 2i query: query(((anchor1, rel1), (anchor2, rel2), '2i'))"""
+        m = re.search(r'query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*[\'"]2i[\'"]\)\)', query)
+        if not m:
+            raise ValueError(f"Could not parse 2i query: {query}")
+        return (int(m.group(1)), int(m.group(2)),
+                int(m.group(3)), int(m.group(4)))
+
+    def parse_query_3i(self, query: str) -> Tuple[int, int, int, int, int, int]:
+        """Parse 3i query: query(((a1, r1), (a2, r2), (a3, r3), '3i'))"""
+        m = re.search(
+            r'query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*[\'"]3i[\'"]\)\)',
+            query,
+        )
+        if not m:
+            raise ValueError(f"Could not parse 3i query: {query}")
+        return (int(m.group(1)), int(m.group(2)),
+                int(m.group(3)), int(m.group(4)),
+                int(m.group(5)), int(m.group(6)))
+
+    def parse_query_pi(self, query: str) -> Tuple[int, int, int, int, int]:
+        """Parse pi query: query(((a1, r1, r2), (a2, r3), 'pi'))
+
+        Returns (anchor1, rel1, rel2, anchor2, rel3) — matches tensor layout
+        expected by ProjectIntersectPipeline.
+        """
+        m = re.search(
+            r'query\(\(\((\d+),\s*(\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*[\'"]pi[\'"]\)\)',
+            query,
+        )
+        if not m:
+            raise ValueError(f"Could not parse pi query: {query}")
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                int(m.group(4)), int(m.group(5)))
+
+    def parse_query_up(self, query: str) -> Tuple[int, int, int, int, int]:
+        """Parse up query: query(((a1, r1), (a2, r2), r3, 'up'))
+
+        Returns (anchor1, rel1, anchor2, rel2, rel3) — matches tensor layout
+        expected by UnionProjectPipeline.
+        """
+        m = re.search(
+            r'query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*(\d+),\s*[\'"]up[\'"]\)\)',
+            query,
+        )
+        if not m:
+            raise ValueError(f"Could not parse up query: {query}")
+        return (int(m.group(1)), int(m.group(2)),
+                int(m.group(3)), int(m.group(4)),
+                int(m.group(5)))
     
     def load_queries_from_dir(self) -> List[str]:
         """Load queries directly from query_dir/queries (for 3p_pipeline structure)."""
@@ -299,12 +376,18 @@ class BaselineRunner:
         else:
             template = self.detect_query_template(queries[0]) if queries else "3p"
         
-        if template == "2u":
-            return self.run_neo4j_baseline_2u(db_controller, queries, ground_truths)
-        elif template == "2ip":
-            return self.run_neo4j_baseline_2ip(db_controller, queries, ground_truths)
-        else:
-            return self.run_neo4j_baseline_3p(db_controller, queries, ground_truths)
+        routes = {
+            "2u":  self.run_neo4j_baseline_2u,
+            "2ip": self.run_neo4j_baseline_2ip,
+            "2p":  self.run_neo4j_baseline_2p,
+            "2i":  self.run_neo4j_baseline_2i,
+            "3i":  self.run_neo4j_baseline_3i,
+            "pi":  self.run_neo4j_baseline_pi,
+            "up":  self.run_neo4j_baseline_up,
+        }
+        return routes.get(template, self.run_neo4j_baseline_3p)(
+            db_controller, queries, ground_truths
+        )
     
     def run_neo4j_baseline_3p(self, db_controller, queries: List[str], 
                               ground_truths: List[List[int]]) -> List[QueryResult]:
@@ -474,8 +557,202 @@ class BaselineRunner:
         
         return results
     
-    def compute_ultra_scores(self, ultra_model, queries: List[str], 
-                             ground_truths: List[List[int]], 
+    def run_neo4j_baseline_2p(self, db_controller, queries: List[str],
+                              ground_truths: List[List[int]]) -> List[QueryResult]:
+        """Neo4j symbolic baseline for 2p (2-hop path) queries."""
+        self.logger.info("Running Neo4j Symbolic Baseline (2p)...")
+        ONE_HOP = "MATCH (a:Entity {id: %s})-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id"
+        PROJ = ("UNWIND [%s] AS node_id MATCH (i:Entity {id: node_id})"
+                "-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id")
+
+        results = []
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Neo4j Symbolic (2p)")):
+            try:
+                entity_id, rel_types = self.parse_query_2p(query_str)
+                start_time = time.time()
+
+                res1 = db_controller.execute_query(ONE_HOP % (entity_id, rel_types[0]))
+                hop1 = [record["r.id"] for record in res1]
+
+                if not hop1:
+                    pred_values = []
+                else:
+                    ids = ', '.join(map(str, hop1))
+                    res2 = db_controller.execute_query(PROJ % (ids, rel_types[1]))
+                    pred_values = [record["r.id"] for record in res2]
+
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=2, ultra_calls=0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_neo4j_baseline_2i(self, db_controller, queries: List[str],
+                              ground_truths: List[List[int]]) -> List[QueryResult]:
+        """Neo4j symbolic baseline for 2i (2-way intersection) queries."""
+        self.logger.info("Running Neo4j Symbolic Baseline (2i)...")
+        ONE_HOP = "MATCH (a:Entity {id: %s})-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id"
+
+        results = []
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Neo4j Symbolic (2i)")):
+            try:
+                a1, r1, a2, r2 = self.parse_query_2i(query_str)
+                start_time = time.time()
+                set1 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a1, r1))}
+                set2 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a2, r2))}
+                pred_values = list(set1 & set2)
+                execution_time_ms = (time.time() - start_time) * 1000
+
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=2, ultra_calls=0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_neo4j_baseline_3i(self, db_controller, queries: List[str],
+                              ground_truths: List[List[int]]) -> List[QueryResult]:
+        """Neo4j symbolic baseline for 3i (3-way intersection) queries."""
+        self.logger.info("Running Neo4j Symbolic Baseline (3i)...")
+        ONE_HOP = "MATCH (a:Entity {id: %s})-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id"
+
+        results = []
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Neo4j Symbolic (3i)")):
+            try:
+                a1, r1, a2, r2, a3, r3 = self.parse_query_3i(query_str)
+                start_time = time.time()
+                set1 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a1, r1))}
+                set2 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a2, r2))}
+                set3 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a3, r3))}
+                pred_values = list(set1 & set2 & set3)
+                execution_time_ms = (time.time() - start_time) * 1000
+
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=3, ultra_calls=0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_neo4j_baseline_pi(self, db_controller, queries: List[str],
+                              ground_truths: List[List[int]]) -> List[QueryResult]:
+        """Neo4j symbolic baseline for pi (project-intersect) queries.
+
+        Execution: 2-hop chain (anchor1, rel1, rel2) intersected with 1-hop
+        branch (anchor2, rel3).
+        """
+        self.logger.info("Running Neo4j Symbolic Baseline (pi)...")
+        ONE_HOP = "MATCH (a:Entity {id: %s})-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id"
+        PROJ = ("UNWIND [%s] AS node_id MATCH (i:Entity {id: node_id})"
+                "-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id")
+
+        results = []
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Neo4j Symbolic (pi)")):
+            try:
+                a1, r1, r2, a2, r3 = self.parse_query_pi(query_str)
+                start_time = time.time()
+
+                chain_hop1 = [r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a1, r1))]
+                if not chain_hop1:
+                    chain_set = set()
+                else:
+                    ids = ', '.join(map(str, chain_hop1))
+                    chain_set = {r["r.id"] for r in db_controller.execute_query(PROJ % (ids, r2))}
+
+                branch_set = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a2, r3))}
+                pred_values = list(chain_set & branch_set)
+                execution_time_ms = (time.time() - start_time) * 1000
+
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=3, ultra_calls=0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_neo4j_baseline_up(self, db_controller, queries: List[str],
+                              ground_truths: List[List[int]]) -> List[QueryResult]:
+        """Neo4j symbolic baseline for up (union-project) queries.
+
+        Execution: union two 1-hops, then project (rel3) from the union.
+        """
+        self.logger.info("Running Neo4j Symbolic Baseline (up)...")
+        ONE_HOP = "MATCH (a:Entity {id: %s})-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id"
+        PROJ = ("UNWIND [%s] AS node_id MATCH (i:Entity {id: node_id})"
+                "-[f:Relation {type: %s}]->(r:Entity) RETURN DISTINCT r.id")
+
+        results = []
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Neo4j Symbolic (up)")):
+            try:
+                a1, r1, a2, r2, r3 = self.parse_query_up(query_str)
+                start_time = time.time()
+                set1 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a1, r1))}
+                set2 = {r["r.id"] for r in db_controller.execute_query(ONE_HOP % (a2, r2))}
+                union_nodes = set1 | set2
+
+                if not union_nodes:
+                    pred_values = []
+                else:
+                    ids = ', '.join(map(str, union_nodes))
+                    pred_values = [r["r.id"] for r in db_controller.execute_query(PROJ % (ids, r3))]
+
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=3, ultra_calls=0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def compute_ultra_scores(self, ultra_model, queries: List[str],
+                             ground_truths: List[List[int]],
                              graph_data: Any,
                              min_threshold: float = 0.0,
                              batch_size: int = 32) -> List[Dict]:
@@ -489,12 +766,17 @@ class BaselineRunner:
         else:
             template = self.detect_query_template(queries[0]) if queries else "3p"
         
-        if template == "2u":
-            return self.compute_ultra_scores_2u(ultra_model, queries, ground_truths, graph_data, min_threshold, batch_size)
-        elif template == "2ip":
-            return self.compute_ultra_scores_2ip(ultra_model, queries, ground_truths, graph_data, min_threshold, batch_size)
-        else:
-            return self.compute_ultra_scores_3p(ultra_model, queries, ground_truths, graph_data, min_threshold, batch_size)
+        routes = {
+            "2u":  self.compute_ultra_scores_2u,
+            "2ip": self.compute_ultra_scores_2ip,
+            "2p":  self.compute_ultra_scores_2p,
+            "2i":  self.compute_ultra_scores_2i,
+            "3i":  self.compute_ultra_scores_3i,
+            "pi":  self.compute_ultra_scores_pi,
+            "up":  self.compute_ultra_scores_up,
+        }
+        fn = routes.get(template, self.compute_ultra_scores_3p)
+        return fn(ultra_model, queries, ground_truths, graph_data, min_threshold, batch_size)
     
     def compute_ultra_scores_3p(self, ultra_model, queries: List[str], 
                                 ground_truths: List[List[int]], 
@@ -792,12 +1074,16 @@ class BaselineRunner:
         
         template = scores_data[0].get('template', '3p')
         
-        if template == "2u":
-            return self.apply_threshold_to_scores_2u(scores_data, threshold)
-        elif template == "2ip":
-            return self.apply_threshold_to_scores_2ip(scores_data, threshold)
-        else:
-            return self.apply_threshold_to_scores_3p(scores_data, threshold)
+        routes = {
+            "2u":  self.apply_threshold_to_scores_2u,
+            "2ip": self.apply_threshold_to_scores_2ip,
+            "2p":  self.apply_threshold_to_scores_2p,
+            "2i":  self.apply_threshold_to_scores_2i,
+            "3i":  self.apply_threshold_to_scores_3i,
+            "pi":  self.apply_threshold_to_scores_pi,
+            "up":  self.apply_threshold_to_scores_up,
+        }
+        return routes.get(template, self.apply_threshold_to_scores_3p)(scores_data, threshold)
     
     def apply_threshold_to_scores_3p(self, scores_data: List[Dict], threshold: float,
                                      batch_size: int = 32) -> List[QueryResult]:
@@ -953,8 +1239,432 @@ class BaselineRunner:
         
         return results
     
-    def run_ultra_pipeline_baseline(self, ultra_model, queries: List[str], 
-                                    ground_truths: List[List[int]], 
+    def compute_ultra_scores_2p(self, ultra_model, queries: List[str],
+                                ground_truths: List[List[int]],
+                                graph_data: Any,
+                                min_threshold: float = 0.0,
+                                batch_size: int = 32) -> List[Dict]:
+        """Compute Ultra scores for 2p queries (hop1 + hop2 path scores)."""
+        self.logger.info(f"Computing Ultra scores (2p, min_threshold={min_threshold})...")
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+        scores_data = []
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Computing Ultra scores (2p)")):
+            try:
+                entity_id, rel_types = self.parse_query_2p(query_str)
+                start_time = time.time()
+
+                hop1_query = torch.tensor([[entity_id, rel_types[0]]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    hop1_scores_gpu = ultra_model.forward(graph_data, hop1_query)[0]
+                hop1_candidates = self._apply_threshold(hop1_scores_gpu, min_threshold)
+                hop1_scores = hop1_scores_gpu.cpu().clone()
+                del hop1_scores_gpu, hop1_query
+
+                hop2_scores = self._process_hop_batch_get_scores(
+                    ultra_model, graph_data, hop1_candidates, rel_types[1], batch_size
+                )
+                del hop1_candidates
+
+                execution_time_ms = (time.time() - start_time) * 1000
+                scores_data.append({
+                    'hop1_scores': hop1_scores,
+                    'hop2_scores': hop2_scores,
+                    'rel_types': rel_types,
+                    'entity_id': entity_id,
+                    'ground_truth': gt,
+                    'execution_time_ms': execution_time_ms,
+                    'template': '2p',
+                })
+            except Exception as e:
+                self.logger.error(f"Error computing scores for 2p query {i}: {e}")
+                scores_data.append({
+                    'hop1_scores': None, 'hop2_scores': {},
+                    'rel_types': [], 'entity_id': 0,
+                    'ground_truth': gt, 'execution_time_ms': 0.0, 'template': '2p',
+                })
+            finally:
+                if i % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return scores_data
+
+    def compute_ultra_scores_2i(self, ultra_model, queries: List[str],
+                                ground_truths: List[List[int]],
+                                graph_data: Any,
+                                min_threshold: float = 0.0,
+                                batch_size: int = 32) -> List[Dict]:
+        """Compute Ultra scores for 2i queries (two branch scores, intersect at threshold time)."""
+        self.logger.info(f"Computing Ultra scores (2i, min_threshold={min_threshold})...")
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+        scores_data = []
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Computing Ultra scores (2i)")):
+            try:
+                a1, r1, a2, r2 = self.parse_query_2i(query_str)
+                start_time = time.time()
+                q1 = torch.tensor([[a1, r1]], dtype=torch.long).to(device)
+                q2 = torch.tensor([[a2, r2]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    s1 = ultra_model.forward(graph_data, q1)[0]
+                    s2 = ultra_model.forward(graph_data, q2)[0]
+                b1 = s1.cpu().clone()
+                b2 = s2.cpu().clone()
+                del s1, s2, q1, q2
+                execution_time_ms = (time.time() - start_time) * 1000
+                scores_data.append({
+                    'branch1_scores': b1, 'branch2_scores': b2,
+                    'ground_truth': gt, 'execution_time_ms': execution_time_ms,
+                    'template': '2i',
+                })
+            except Exception as e:
+                self.logger.error(f"Error computing scores for 2i query {i}: {e}")
+                scores_data.append({
+                    'branch1_scores': None, 'branch2_scores': None,
+                    'ground_truth': gt, 'execution_time_ms': 0.0, 'template': '2i',
+                })
+            finally:
+                if i % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return scores_data
+
+    def compute_ultra_scores_3i(self, ultra_model, queries: List[str],
+                                ground_truths: List[List[int]],
+                                graph_data: Any,
+                                min_threshold: float = 0.0,
+                                batch_size: int = 32) -> List[Dict]:
+        """Compute Ultra scores for 3i queries (three branch scores)."""
+        self.logger.info(f"Computing Ultra scores (3i, min_threshold={min_threshold})...")
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+        scores_data = []
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Computing Ultra scores (3i)")):
+            try:
+                a1, r1, a2, r2, a3, r3 = self.parse_query_3i(query_str)
+                start_time = time.time()
+                qs = [torch.tensor([[a, r]], dtype=torch.long).to(device)
+                      for a, r in [(a1, r1), (a2, r2), (a3, r3)]]
+                with torch.no_grad():
+                    branch_scores = [ultra_model.forward(graph_data, q)[0].cpu().clone() for q in qs]
+                del qs
+                execution_time_ms = (time.time() - start_time) * 1000
+                scores_data.append({
+                    'branch1_scores': branch_scores[0],
+                    'branch2_scores': branch_scores[1],
+                    'branch3_scores': branch_scores[2],
+                    'ground_truth': gt, 'execution_time_ms': execution_time_ms,
+                    'template': '3i',
+                })
+            except Exception as e:
+                self.logger.error(f"Error computing scores for 3i query {i}: {e}")
+                scores_data.append({
+                    'branch1_scores': None, 'branch2_scores': None, 'branch3_scores': None,
+                    'ground_truth': gt, 'execution_time_ms': 0.0, 'template': '3i',
+                })
+            finally:
+                if i % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return scores_data
+
+    def compute_ultra_scores_pi(self, ultra_model, queries: List[str],
+                                ground_truths: List[List[int]],
+                                graph_data: Any,
+                                min_threshold: float = 0.0,
+                                batch_size: int = 32) -> List[Dict]:
+        """Compute Ultra scores for pi queries.
+
+        Stores chain_hop1_scores (anchor1 → rel1), chain_hop2_scores
+        (per-parent rel2 scores), and branch_1p_scores (anchor2 → rel3).
+        """
+        self.logger.info(f"Computing Ultra scores (pi, min_threshold={min_threshold})...")
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+        scores_data = []
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Computing Ultra scores (pi)")):
+            try:
+                a1, r1, r2, a2, r3 = self.parse_query_pi(query_str)
+                start_time = time.time()
+
+                # Chain hop1
+                q_chain = torch.tensor([[a1, r1]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    chain_hop1_gpu = ultra_model.forward(graph_data, q_chain)[0]
+                chain_hop1_candidates = self._apply_threshold(chain_hop1_gpu, min_threshold)
+                chain_hop1 = chain_hop1_gpu.cpu().clone()
+                del chain_hop1_gpu, q_chain
+
+                # Chain hop2 (path-aware)
+                chain_hop2 = self._process_hop_batch_get_scores(
+                    ultra_model, graph_data, chain_hop1_candidates, r2, batch_size,
+                )
+                del chain_hop1_candidates
+
+                # 1p branch
+                q_branch = torch.tensor([[a2, r3]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    branch_1p_gpu = ultra_model.forward(graph_data, q_branch)[0]
+                branch_1p = branch_1p_gpu.cpu().clone()
+                del branch_1p_gpu, q_branch
+
+                execution_time_ms = (time.time() - start_time) * 1000
+                scores_data.append({
+                    'chain_hop1_scores': chain_hop1,
+                    'chain_hop2_scores': chain_hop2,  # dict parent -> CPU tensor
+                    'branch_1p_scores': branch_1p,
+                    'ground_truth': gt, 'execution_time_ms': execution_time_ms,
+                    'template': 'pi',
+                })
+            except Exception as e:
+                self.logger.error(f"Error computing scores for pi query {i}: {e}")
+                scores_data.append({
+                    'chain_hop1_scores': None,
+                    'chain_hop2_scores': {},
+                    'branch_1p_scores': None,
+                    'ground_truth': gt, 'execution_time_ms': 0.0, 'template': 'pi',
+                })
+            finally:
+                if i % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return scores_data
+
+    def compute_ultra_scores_up(self, ultra_model, queries: List[str],
+                                ground_truths: List[List[int]],
+                                graph_data: Any,
+                                min_threshold: float = 0.0,
+                                batch_size: int = 32) -> List[Dict]:
+        """Compute Ultra scores for up queries.
+
+        Stores branch1_scores, branch2_scores, and proj_scores (per-parent
+        rel3 scores for the union frontier).
+        """
+        self.logger.info(f"Computing Ultra scores (up, min_threshold={min_threshold})...")
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+        scores_data = []
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Computing Ultra scores (up)")):
+            try:
+                a1, r1, a2, r2, r3 = self.parse_query_up(query_str)
+                start_time = time.time()
+                q1 = torch.tensor([[a1, r1]], dtype=torch.long).to(device)
+                q2 = torch.tensor([[a2, r2]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    s1 = ultra_model.forward(graph_data, q1)[0]
+                    s2 = ultra_model.forward(graph_data, q2)[0]
+                # Frontier = union of nodes above min_threshold in either branch.
+                union_candidates = list(
+                    set(self._apply_threshold(s1, min_threshold))
+                    | set(self._apply_threshold(s2, min_threshold))
+                )
+                b1 = s1.cpu().clone()
+                b2 = s2.cpu().clone()
+                del s1, s2, q1, q2
+
+                proj_scores = {}
+                if union_candidates:
+                    proj_scores = self._process_hop_batch_get_scores(
+                        ultra_model, graph_data, union_candidates, r3, batch_size,
+                    )
+                del union_candidates
+
+                execution_time_ms = (time.time() - start_time) * 1000
+                scores_data.append({
+                    'branch1_scores': b1, 'branch2_scores': b2,
+                    'proj_scores': proj_scores,
+                    'ground_truth': gt, 'execution_time_ms': execution_time_ms,
+                    'template': 'up',
+                })
+            except Exception as e:
+                self.logger.error(f"Error computing scores for up query {i}: {e}")
+                scores_data.append({
+                    'branch1_scores': None, 'branch2_scores': None, 'proj_scores': {},
+                    'ground_truth': gt, 'execution_time_ms': 0.0, 'template': 'up',
+                })
+            finally:
+                if i % 10 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return scores_data
+
+    def apply_threshold_to_scores_2p(self, scores_data: List[Dict], threshold: float) -> List[QueryResult]:
+        """Apply threshold to pre-computed 2p scores."""
+        results = []
+        for i, data in enumerate(tqdm(scores_data, desc=f"Applying threshold {threshold} (2p)")):
+            try:
+                if data.get('hop1_scores') is None:
+                    results.append(self._create_error_result(data['ground_truth']))
+                    continue
+                execution_time_ms = data.get('execution_time_ms', 0.0)
+                hop1_nodes = self._apply_threshold(data['hop1_scores'], threshold)
+                if not hop1_nodes:
+                    results.append(self._create_abstention_result(data['ground_truth'], execution_time_ms))
+                    continue
+                hop2_set = set()
+                for n in hop1_nodes:
+                    if n in data.get('hop2_scores', {}):
+                        hop2_set.update(self._apply_threshold(data['hop2_scores'][n], threshold))
+                hop2_nodes = list(hop2_set)
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(hop2_nodes, data['ground_truth'])
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=hop2_nodes,
+                    ground_truth=self._normalize_ground_truth(data['ground_truth']),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(hop2_nodes) == 0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error applying threshold to 2p query {i}: {e}")
+                results.append(self._create_error_result(data['ground_truth']))
+        return results
+
+    def apply_threshold_to_scores_2i(self, scores_data: List[Dict], threshold: float) -> List[QueryResult]:
+        """Apply threshold to pre-computed 2i scores."""
+        results = []
+        for i, data in enumerate(tqdm(scores_data, desc=f"Applying threshold {threshold} (2i)")):
+            try:
+                if data.get('branch1_scores') is None or data.get('branch2_scores') is None:
+                    results.append(self._create_error_result(data['ground_truth']))
+                    continue
+                execution_time_ms = data.get('execution_time_ms', 0.0)
+                b1 = set(self._apply_threshold(data['branch1_scores'], threshold))
+                b2 = set(self._apply_threshold(data['branch2_scores'], threshold))
+                inter = list(b1 & b2)
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(inter, data['ground_truth'])
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=inter,
+                    ground_truth=self._normalize_ground_truth(data['ground_truth']),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(inter) == 0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error applying threshold to 2i query {i}: {e}")
+                results.append(self._create_error_result(data['ground_truth']))
+        return results
+
+    def apply_threshold_to_scores_3i(self, scores_data: List[Dict], threshold: float) -> List[QueryResult]:
+        """Apply threshold to pre-computed 3i scores."""
+        results = []
+        for i, data in enumerate(tqdm(scores_data, desc=f"Applying threshold {threshold} (3i)")):
+            try:
+                if any(data.get(k) is None for k in ('branch1_scores', 'branch2_scores', 'branch3_scores')):
+                    results.append(self._create_error_result(data['ground_truth']))
+                    continue
+                execution_time_ms = data.get('execution_time_ms', 0.0)
+                b1 = set(self._apply_threshold(data['branch1_scores'], threshold))
+                b2 = set(self._apply_threshold(data['branch2_scores'], threshold))
+                b3 = set(self._apply_threshold(data['branch3_scores'], threshold))
+                inter = list(b1 & b2 & b3)
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(inter, data['ground_truth'])
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=inter,
+                    ground_truth=self._normalize_ground_truth(data['ground_truth']),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(inter) == 0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error applying threshold to 3i query {i}: {e}")
+                results.append(self._create_error_result(data['ground_truth']))
+        return results
+
+    def apply_threshold_to_scores_pi(self, scores_data: List[Dict], threshold: float) -> List[QueryResult]:
+        """Apply threshold to pre-computed pi scores."""
+        results = []
+        for i, data in enumerate(tqdm(scores_data, desc=f"Applying threshold {threshold} (pi)")):
+            try:
+                if data.get('chain_hop1_scores') is None or data.get('branch_1p_scores') is None:
+                    results.append(self._create_error_result(data['ground_truth']))
+                    continue
+                execution_time_ms = data.get('execution_time_ms', 0.0)
+
+                chain_hop1_nodes = self._apply_threshold(data['chain_hop1_scores'], threshold)
+                if not chain_hop1_nodes:
+                    results.append(self._create_abstention_result(data['ground_truth'], execution_time_ms))
+                    continue
+
+                chain_set = set()
+                for n in chain_hop1_nodes:
+                    if n in data.get('chain_hop2_scores', {}):
+                        chain_set.update(self._apply_threshold(data['chain_hop2_scores'][n], threshold))
+
+                branch_set = set(self._apply_threshold(data['branch_1p_scores'], threshold))
+                inter = list(chain_set & branch_set)
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(inter, data['ground_truth'])
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=inter,
+                    ground_truth=self._normalize_ground_truth(data['ground_truth']),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(inter) == 0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error applying threshold to pi query {i}: {e}")
+                results.append(self._create_error_result(data['ground_truth']))
+        return results
+
+    def apply_threshold_to_scores_up(self, scores_data: List[Dict], threshold: float) -> List[QueryResult]:
+        """Apply threshold to pre-computed up scores."""
+        results = []
+        for i, data in enumerate(tqdm(scores_data, desc=f"Applying threshold {threshold} (up)")):
+            try:
+                if data.get('branch1_scores') is None or data.get('branch2_scores') is None:
+                    results.append(self._create_error_result(data['ground_truth']))
+                    continue
+                execution_time_ms = data.get('execution_time_ms', 0.0)
+                b1 = set(self._apply_threshold(data['branch1_scores'], threshold))
+                b2 = set(self._apply_threshold(data['branch2_scores'], threshold))
+                union = b1 | b2
+                if not union:
+                    results.append(self._create_abstention_result(data['ground_truth'], execution_time_ms))
+                    continue
+                proj_set = set()
+                for n in union:
+                    if n in data.get('proj_scores', {}):
+                        proj_set.update(self._apply_threshold(data['proj_scores'][n], threshold))
+                final = list(proj_set)
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(final, data['ground_truth'])
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=final,
+                    ground_truth=self._normalize_ground_truth(data['ground_truth']),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(final) == 0,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error applying threshold to up query {i}: {e}")
+                results.append(self._create_error_result(data['ground_truth']))
+        return results
+
+    def run_ultra_pipeline_baseline(self, ultra_model, queries: List[str],
+                                    ground_truths: List[List[int]],
                                     graph_data: Any,
                                     static_threshold: float = 0.75,
                                     batch_size: int = 32,
@@ -980,12 +1690,17 @@ class BaselineRunner:
         else:
             template = self.detect_query_template(queries[0]) if queries else "3p"
         
-        if template == "2u":
-            return self.run_ultra_pipeline_baseline_2u(ultra_model, queries, ground_truths, graph_data, static_threshold, batch_size)
-        elif template == "2ip":
-            return self.run_ultra_pipeline_baseline_2ip(ultra_model, queries, ground_truths, graph_data, static_threshold, batch_size)
-        else:
-            return self.run_ultra_pipeline_baseline_3p(ultra_model, queries, ground_truths, graph_data, static_threshold, batch_size)
+        routes = {
+            "2u":  self.run_ultra_pipeline_baseline_2u,
+            "2ip": self.run_ultra_pipeline_baseline_2ip,
+            "2p":  self.run_ultra_pipeline_baseline_2p,
+            "2i":  self.run_ultra_pipeline_baseline_2i,
+            "3i":  self.run_ultra_pipeline_baseline_3i,
+            "pi":  self.run_ultra_pipeline_baseline_pi,
+            "up":  self.run_ultra_pipeline_baseline_up,
+        }
+        fn = routes.get(template, self.run_ultra_pipeline_baseline_3p)
+        return fn(ultra_model, queries, ground_truths, graph_data, static_threshold, batch_size)
     
     def run_ultra_pipeline_baseline_3p(self, ultra_model, queries: List[str], 
                                       ground_truths: List[List[int]], 
@@ -1171,6 +1886,229 @@ class BaselineRunner:
         return results
     
     
+    def run_ultra_pipeline_baseline_2p(self, ultra_model, queries: List[str],
+                                       ground_truths: List[List[int]],
+                                       graph_data: Any,
+                                       static_threshold: float = 0.75,
+                                       batch_size: int = 32) -> List[QueryResult]:
+        """Ultra neural baseline for 2p queries (no score cache)."""
+        self.logger.info(f"Running Ultra Neural Baseline (2p, threshold={static_threshold})...")
+        results = []
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Ultra Neural (2p)")):
+            try:
+                entity_id, rel_types = self.parse_query_2p(query_str)
+                start_time = time.time()
+                q = torch.tensor([[entity_id, rel_types[0]]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    hop1_scores = ultra_model.forward(graph_data, q)
+                hop1_nodes = self._apply_threshold(hop1_scores[0], static_threshold)
+                if not hop1_nodes:
+                    results.append(self._create_abstention_result(
+                        gt, (time.time() - start_time) * 1000, ultra_calls=1))
+                    continue
+                hop2_nodes, hop2_calls = self._process_hop_batch(
+                    ultra_model, graph_data, hop1_nodes, rel_types[1], static_threshold, batch_size
+                )
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(hop2_nodes, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=hop2_nodes,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(hop2_nodes) == 0,
+                    neo4j_calls=0, ultra_calls=1 + hop2_calls,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing 2p query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_ultra_pipeline_baseline_2i(self, ultra_model, queries: List[str],
+                                       ground_truths: List[List[int]],
+                                       graph_data: Any,
+                                       static_threshold: float = 0.75,
+                                       batch_size: int = 32) -> List[QueryResult]:
+        """Ultra neural baseline for 2i queries (no score cache)."""
+        self.logger.info(f"Running Ultra Neural Baseline (2i, threshold={static_threshold})...")
+        results = []
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Ultra Neural (2i)")):
+            try:
+                a1, r1, a2, r2 = self.parse_query_2i(query_str)
+                start_time = time.time()
+                q1 = torch.tensor([[a1, r1]], dtype=torch.long).to(device)
+                q2 = torch.tensor([[a2, r2]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    s1 = ultra_model.forward(graph_data, q1)
+                    s2 = ultra_model.forward(graph_data, q2)
+                n1 = set(self._apply_threshold(s1[0], static_threshold))
+                n2 = set(self._apply_threshold(s2[0], static_threshold))
+                inter = list(n1 & n2)
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(inter, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=inter,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(inter) == 0,
+                    neo4j_calls=0, ultra_calls=2,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing 2i query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_ultra_pipeline_baseline_3i(self, ultra_model, queries: List[str],
+                                       ground_truths: List[List[int]],
+                                       graph_data: Any,
+                                       static_threshold: float = 0.75,
+                                       batch_size: int = 32) -> List[QueryResult]:
+        """Ultra neural baseline for 3i queries (no score cache)."""
+        self.logger.info(f"Running Ultra Neural Baseline (3i, threshold={static_threshold})...")
+        results = []
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Ultra Neural (3i)")):
+            try:
+                a1, r1, a2, r2, a3, r3 = self.parse_query_3i(query_str)
+                start_time = time.time()
+                branch_sets = []
+                for a, r in [(a1, r1), (a2, r2), (a3, r3)]:
+                    q = torch.tensor([[a, r]], dtype=torch.long).to(device)
+                    with torch.no_grad():
+                        s = ultra_model.forward(graph_data, q)
+                    branch_sets.append(set(self._apply_threshold(s[0], static_threshold)))
+                inter = list(branch_sets[0] & branch_sets[1] & branch_sets[2])
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(inter, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=inter,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(inter) == 0,
+                    neo4j_calls=0, ultra_calls=3,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing 3i query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_ultra_pipeline_baseline_pi(self, ultra_model, queries: List[str],
+                                       ground_truths: List[List[int]],
+                                       graph_data: Any,
+                                       static_threshold: float = 0.75,
+                                       batch_size: int = 32) -> List[QueryResult]:
+        """Ultra neural baseline for pi queries (no score cache)."""
+        self.logger.info(f"Running Ultra Neural Baseline (pi, threshold={static_threshold})...")
+        results = []
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Ultra Neural (pi)")):
+            try:
+                a1, r1, r2, a2, r3 = self.parse_query_pi(query_str)
+                start_time = time.time()
+
+                q_chain = torch.tensor([[a1, r1]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    chain1_scores = ultra_model.forward(graph_data, q_chain)
+                chain1_nodes = self._apply_threshold(chain1_scores[0], static_threshold)
+
+                q_branch = torch.tensor([[a2, r3]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    branch_scores = ultra_model.forward(graph_data, q_branch)
+                branch_nodes = set(self._apply_threshold(branch_scores[0], static_threshold))
+
+                if not chain1_nodes:
+                    inter = []
+                    chain_calls = 0
+                else:
+                    chain2_nodes, chain_calls = self._process_hop_batch(
+                        ultra_model, graph_data, chain1_nodes, r2, static_threshold, batch_size
+                    )
+                    inter = list(set(chain2_nodes) & branch_nodes)
+
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(inter, gt)
+                # 1 chain-hop1 + 1 branch + chain_calls for chain-hop2.
+                ultra_calls = 2 + chain_calls
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=inter,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(inter) == 0,
+                    neo4j_calls=0, ultra_calls=ultra_calls,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing pi query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_ultra_pipeline_baseline_up(self, ultra_model, queries: List[str],
+                                       ground_truths: List[List[int]],
+                                       graph_data: Any,
+                                       static_threshold: float = 0.75,
+                                       batch_size: int = 32) -> List[QueryResult]:
+        """Ultra neural baseline for up queries (no score cache)."""
+        self.logger.info(f"Running Ultra Neural Baseline (up, threshold={static_threshold})...")
+        results = []
+        ultra_model.eval()
+        device = graph_data.edge_index.device
+
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc="Ultra Neural (up)")):
+            try:
+                a1, r1, a2, r2, r3 = self.parse_query_up(query_str)
+                start_time = time.time()
+                q1 = torch.tensor([[a1, r1]], dtype=torch.long).to(device)
+                q2 = torch.tensor([[a2, r2]], dtype=torch.long).to(device)
+                with torch.no_grad():
+                    s1 = ultra_model.forward(graph_data, q1)
+                    s2 = ultra_model.forward(graph_data, q2)
+                n1 = set(self._apply_threshold(s1[0], static_threshold))
+                n2 = set(self._apply_threshold(s2[0], static_threshold))
+                union = list(n1 | n2)
+                if not union:
+                    results.append(self._create_abstention_result(
+                        gt, (time.time() - start_time) * 1000, ultra_calls=2))
+                    continue
+                proj_nodes, proj_calls = self._process_hop_batch(
+                    ultra_model, graph_data, union, r3, static_threshold, batch_size
+                )
+                execution_time_ms = (time.time() - start_time) * 1000
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(proj_nodes, gt)
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=proj_nodes,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(proj_nodes) == 0,
+                    neo4j_calls=0, ultra_calls=2 + proj_calls,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing up query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
     def _has_neo4j_results(self, skip_neo4j: bool = False) -> bool:
         """Check if we have Neo4j results to save.
         
@@ -1187,21 +2125,32 @@ class BaselineRunner:
         """Check if we have Hybrid Static results to save."""
         return len(self.results['hybrid_static']) > 0
     
-    def _create_pipeline_model(self, ultra_model, dbexec_model, args: argparse.Namespace, 
+    def _create_pipeline_model(self, ultra_model, dbexec_model, args: argparse.Namespace,
                               device: str, model_name: str):
         """Create the appropriate pipeline model based on model name."""
         from models.topology.three_hop_pipeline import ThreeHopPipeline
         from models.topology.two_union_pipeline import TwoUnionPipeline
         from models.topology.two_intersect_project_pipeline import TwoIntersectProjectPipeline
-        
-        if model_name == "ThreeHopPipeline":
-            return ThreeHopPipeline(ultra_model, dbexec_model, args, device)
-        elif model_name == "TwoUnionPipeline":
-            return TwoUnionPipeline(ultra_model, dbexec_model, args, device)
-        elif model_name == "TwoIntersectProjectPipeline":
-            return TwoIntersectProjectPipeline(ultra_model, dbexec_model, args, device)
-        else:
+        from models.topology.two_hop_pipeline import TwoHopPipeline
+        from models.topology.two_intersect_pipeline import TwoIntersectPipeline
+        from models.topology.three_intersect_pipeline import ThreeIntersectPipeline
+        from models.topology.project_intersect_pipeline import ProjectIntersectPipeline
+        from models.topology.union_project_pipeline import UnionProjectPipeline
+
+        pipelines = {
+            "ThreeHopPipeline":            ThreeHopPipeline,
+            "TwoUnionPipeline":            TwoUnionPipeline,
+            "TwoIntersectProjectPipeline": TwoIntersectProjectPipeline,
+            "TwoHopPipeline":              TwoHopPipeline,
+            "TwoIntersectPipeline":        TwoIntersectPipeline,
+            "ThreeIntersectPipeline":      ThreeIntersectPipeline,
+            "ProjectIntersectPipeline":    ProjectIntersectPipeline,
+            "UnionProjectPipeline":        UnionProjectPipeline,
+        }
+        cls = pipelines.get(model_name)
+        if cls is None:
             raise ValueError(f"Unknown pipeline model: {model_name}")
+        return cls(ultra_model, dbexec_model, args, device)
     
     def run_hybrid_baseline(self, pipeline_model, queries: List[str], 
                            ground_truths: List[List[int]], 
@@ -1217,12 +2166,17 @@ class BaselineRunner:
         else:
             template = self.detect_query_template(queries[0]) if queries else "3p"
         
-        if template == "2u":
-            return self.run_hybrid_baseline_2u(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
-        elif template == "2ip":
-            return self.run_hybrid_baseline_2ip(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
-        else:
-            return self.run_hybrid_baseline_3p(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
+        routes = {
+            "2u":  self.run_hybrid_baseline_2u,
+            "2ip": self.run_hybrid_baseline_2ip,
+            "2p":  self.run_hybrid_baseline_2p,
+            "2i":  self.run_hybrid_baseline_2i,
+            "3i":  self.run_hybrid_baseline_3i,
+            "pi":  self.run_hybrid_baseline_pi,
+            "up":  self.run_hybrid_baseline_up,
+        }
+        fn = routes.get(template, self.run_hybrid_baseline_3p)
+        return fn(pipeline_model, queries, ground_truths, graph_data, static_thresholds)
     
     def run_hybrid_baseline_3p(self, pipeline_model, queries: List[str], 
                                ground_truths: List[List[int]], 
@@ -1387,13 +2341,110 @@ class BaselineRunner:
             except Exception as e:
                 self.logger.error(f"Error processing query {i}: {e}")
                 results.append(self._create_error_result(gt))
-        
+
         return results
-    
+
+    def _run_hybrid_generic(self, pipeline_model, queries: List[str],
+                            ground_truths: List[List[int]], graph_data: Any,
+                            static_thresholds: List[float],
+                            required_thresholds: int,
+                            parser, tensor_builder, desc_tag: str) -> List[QueryResult]:
+        """Shared loop for hybrid baselines on the new topologies.
+
+        Each pipeline's `predict_with_thresholds` has the same call shape; only
+        the per-query tensor layout differs. `parser(query_str)` returns the
+        fields, `tensor_builder(fields)` returns a 1×N long tensor.
+        """
+        thresholds = list(static_thresholds)
+        if len(thresholds) < required_thresholds:
+            thresholds = thresholds + [0.4] * (required_thresholds - len(thresholds))
+        lamhat = thresholds[:required_thresholds]
+        self.logger.info(f"Running Hybrid Baseline ({desc_tag}, thresholds={lamhat})...")
+
+        results = []
+        pipeline_model.eval()
+        for i, (query_str, gt) in enumerate(tqdm(zip(queries, ground_truths),
+                                                  total=len(queries),
+                                                  desc=f"Hybrid ({desc_tag})")):
+            try:
+                fields = parser(query_str)
+                query_tensor = tensor_builder(fields)
+                start_time = time.time()
+                result = pipeline_model.predict_with_thresholds(query_tensor, lamhat, graph_data)
+                predictions, neo4j_per_query, ultra_per_query = result[0], result[1], result[2]
+                execution_time_ms = (time.time() - start_time) * 1000
+
+                pred_values = predictions[0] if predictions else []
+                precision, recall, f1, _ = self._compute_metrics_from_predictions(pred_values, gt)
+                neo4j_calls = neo4j_per_query[0] if neo4j_per_query else 0
+                ultra_calls = ultra_per_query[0] if ultra_per_query else 0
+                results.append(QueryResult(
+                    precision=precision, recall=recall, f1=f1,
+                    predicted_values=pred_values,
+                    ground_truth=self._normalize_ground_truth(gt),
+                    execution_time_ms=execution_time_ms,
+                    is_abstention=len(pred_values) == 0,
+                    neo4j_calls=neo4j_calls, ultra_calls=ultra_calls,
+                ))
+            except Exception as e:
+                self.logger.error(f"Error processing query {i}: {e}")
+                results.append(self._create_error_result(gt))
+        return results
+
+    def run_hybrid_baseline_2p(self, pipeline_model, queries, ground_truths,
+                               graph_data, static_thresholds):
+        return self._run_hybrid_generic(
+            pipeline_model, queries, ground_truths, graph_data, static_thresholds,
+            required_thresholds=2,
+            parser=self.parse_query_2p,
+            tensor_builder=lambda f: torch.tensor([[f[0]] + f[1]], dtype=torch.long),
+            desc_tag="2p",
+        )
+
+    def run_hybrid_baseline_2i(self, pipeline_model, queries, ground_truths,
+                               graph_data, static_thresholds):
+        return self._run_hybrid_generic(
+            pipeline_model, queries, ground_truths, graph_data, static_thresholds,
+            required_thresholds=2,
+            parser=self.parse_query_2i,
+            tensor_builder=lambda f: torch.tensor([list(f)], dtype=torch.long),
+            desc_tag="2i",
+        )
+
+    def run_hybrid_baseline_3i(self, pipeline_model, queries, ground_truths,
+                               graph_data, static_thresholds):
+        return self._run_hybrid_generic(
+            pipeline_model, queries, ground_truths, graph_data, static_thresholds,
+            required_thresholds=3,
+            parser=self.parse_query_3i,
+            tensor_builder=lambda f: torch.tensor([list(f)], dtype=torch.long),
+            desc_tag="3i",
+        )
+
+    def run_hybrid_baseline_pi(self, pipeline_model, queries, ground_truths,
+                               graph_data, static_thresholds):
+        return self._run_hybrid_generic(
+            pipeline_model, queries, ground_truths, graph_data, static_thresholds,
+            required_thresholds=3,
+            parser=self.parse_query_pi,
+            tensor_builder=lambda f: torch.tensor([list(f)], dtype=torch.long),
+            desc_tag="pi",
+        )
+
+    def run_hybrid_baseline_up(self, pipeline_model, queries, ground_truths,
+                               graph_data, static_thresholds):
+        return self._run_hybrid_generic(
+            pipeline_model, queries, ground_truths, graph_data, static_thresholds,
+            required_thresholds=3,
+            parser=self.parse_query_up,
+            tensor_builder=lambda f: torch.tensor([list(f)], dtype=torch.long),
+            desc_tag="up",
+        )
+
     def _has_hybrid_results(self) -> bool:
         """Check if we have Hybrid results to save."""
         return len(self.results['hybrid_static']) > 0
-    
+
     def _write_csv_line(self, f, baseline_type: str, threshold: str, stats: Dict[str, float]):
         """Write a single CSV line for baseline results."""
         f.write(f"{baseline_type},{threshold},"
@@ -1635,12 +2686,12 @@ class BaselineRunner:
                 else:
                     template = self.detect_query_template(queries[0]) if queries else "3p"
                 
-                if template == "2u":
-                    hybrid_thresholds = [static_threshold, static_threshold]
-                elif template == "2ip":
-                    hybrid_thresholds = [static_threshold, static_threshold, static_threshold]
-                elif template == "3p":
-                    hybrid_thresholds = [static_threshold, static_threshold, static_threshold]
+                threshold_counts = {
+                    "2u": 2, "2p": 2, "2i": 2,
+                    "2ip": 3, "3p": 3, "3i": 3, "pi": 3, "up": 3,
+                }
+                n = threshold_counts.get(template, 3)
+                hybrid_thresholds = [static_threshold] * n
             
             # Store the first threshold for reporting (all thresholds are typically the same)
             self.hybrid_threshold = hybrid_thresholds[0] if hybrid_thresholds else None
@@ -1908,9 +2959,14 @@ def _get_model_from_query_dir(query_dir: str) -> str:
     - 2ip_pipeline → TwoIntersectProjectPipeline
     """
     query_type_to_model = {
-        "3p_pipeline": "ThreeHopPipeline",
-        "2u_pipeline": "TwoUnionPipeline",
+        "3p_pipeline":  "ThreeHopPipeline",
+        "2u_pipeline":  "TwoUnionPipeline",
         "2ip_pipeline": "TwoIntersectProjectPipeline",
+        "2p_pipeline":  "TwoHopPipeline",
+        "2i_pipeline":  "TwoIntersectPipeline",
+        "3i_pipeline":  "ThreeIntersectPipeline",
+        "pi_pipeline":  "ProjectIntersectPipeline",
+        "up_pipeline":  "UnionProjectPipeline",
     }
     
     for query_type, model_name in query_type_to_model.items():
@@ -1992,10 +3048,50 @@ def _print_configuration(dataset: str = None, baseline_type: str = None,
 
 
 def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool, skip_ultra: bool):
-    """Run benchmarks with multiple thresholds (compute scores once, apply all thresholds)."""
+    """Run benchmarks with multiple thresholds.
+
+    Default: compute scores once with min_threshold=lowest-θ, then re-apply each θ to the
+    cached scores. Fast, but the per-query latency is the single worst-case inference time
+    shared across all thresholds.
+
+    With --no-score-cache: run each (query, θ) independently. Each pass does its own
+    inference with inter-hop pruning at θ, so the recorded latency reflects the actual
+    cost at that threshold. Use this for latency experiments.
+    """
+    no_cache = getattr(args, 'no_score_cache', False)
+
+    if no_cache:
+        # Per-θ independent runs with proper inter-hop pruning.
+        # min_threshold is unused on this path (each call uses static_threshold for pruning).
+        run_neo4j_on_first = not skip_neo4j
+        for idx, threshold in enumerate(args.ultra_thresholds):
+            runner.results['ultra_neural'] = []  # Clear previous Ultra results
+            skip_neo4j_this_call = skip_neo4j or (idx > 0)  # Run Neo4j only on first threshold
+            if idx == 0 and run_neo4j_on_first:
+                runner.results['neo4j_symbolic'] = []  # Clear before the only Neo4j run
+            runner.run(
+                output_dir=args.output_dir,
+                static_threshold=threshold,
+                load_path=args.load_path,
+                device=args.device,
+                neo4j_host=args.neo4j_host,
+                neo4j_bolt_port=args.neo4j_bolt_port,
+                node_unique_id=args.node_unique_id,
+                relation_unique_id=args.relation_unique_id,
+                skip_neo4j=skip_neo4j_this_call,
+                skip_ultra=skip_ultra,
+                skip_hybrid=True,
+                compute_scores_only=False,
+                scores_cache=None,  # Force the per-θ inference path
+                min_threshold=0.0,
+                json_suffix=f"_{threshold}"
+            )
+        return
+
+    # Cached path (default): compute once, re-threshold many times.
     # Use first threshold as min_threshold if not explicitly provided (and not 0.0)
     min_threshold = args.min_threshold if args.min_threshold != 0.0 else args.ultra_thresholds[0]
-    
+
     # Compute scores once
     result = runner.run(
         output_dir=args.output_dir,
@@ -2013,7 +3109,7 @@ def _run_with_multiple_thresholds(runner: BaselineRunner, args, skip_neo4j: bool
         min_threshold=min_threshold
     )
     scores_cache = result.get('scores_cache')
-    
+
     # Apply each threshold - save all results in the same directory
     # CSV is appended automatically, JSON gets threshold suffix
     for threshold in args.ultra_thresholds:
@@ -2081,6 +3177,10 @@ def main():
                        help="Minimum threshold for computing scores (to avoid computing for all nodes)")
     parser.add_argument("--ultra-thresholds", type=float, nargs='+', default=None,
                        help="Multiple thresholds to apply (if provided, computes scores once and applies all thresholds)")
+    parser.add_argument("--no-score-cache", action="store_true", default=False,
+                       help="Disable the score cache when sweeping --ultra-thresholds. Each (query, threshold) "
+                            "runs its own inference with inter-hop pruning at that threshold, so per-query "
+                            "latency reflects the actual cost at that threshold. Use this for latency experiments.")
     parser.add_argument("--skip-hybrid", action="store_true",
                        help="Skip hybrid baseline (neural + symbolic with static thresholds)")
     parser.add_argument("--hybrid-thresholds", type=float, nargs='+', default=None,

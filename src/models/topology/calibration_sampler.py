@@ -66,7 +66,7 @@ class FileBasedDataIterator:
         """Load answers from all hop levels and organize by hop"""
         answers_by_hop = {}
         intermediate_dir = os.path.join(self.calibration_data_path, "intermediate_hops")
-        
+
         # Load answers for all available hop levels
         for hop in range(1, 4):  # Check for hop_1, hop_2, hop_3
             hop_dir = os.path.join(intermediate_dir, f"hop_{hop}")
@@ -81,7 +81,22 @@ class FileBasedDataIterator:
                         logging.info(f"Loaded answers for hop {hop}: {len(capped_hop_answers)} queries")
                 except Exception as e:
                     logging.warning(f"Failed to load answers for hop {hop}: {e}")
-        
+
+        # Also load the top-level answers.pkl as the canonical final answer per query.
+        # This is what the conformal optimizer should compare predictions against for
+        # topologies whose final answer isn't naturally represented as a single hop
+        # (e.g. 2i/3i intersection-of-branches, pi chain∩branch, up project-over-union).
+        final_path = os.path.join(self.calibration_data_path, "answers.pkl")
+        if os.path.exists(final_path):
+            try:
+                with open(final_path, "rb") as f:
+                    final_answers = pickle.load(f)
+                capped_final = {query: final_answers.get(query, []) for query in queries}
+                answers_by_hop["final"] = capped_final
+                logging.info(f"Loaded final answers: {len(capped_final)} queries")
+            except Exception as e:
+                logging.warning(f"Failed to load final answers.pkl: {e}")
+
         return answers_by_hop
     
     def _load_graph_data(self):
@@ -253,23 +268,37 @@ class CalibrationDataset(Dataset):
         # - 2ip: ((anchor1, rel1), (anchor2, rel2), rel3, "2ip")
         
         if isinstance(query, tuple):
-            # Check if it's a 2u query: ((anchor1, rel1), (anchor2, rel2), "2u")
+            # 2u: ((anchor1, rel1), (anchor2, rel2), "2u") → [anchor1, rel1, anchor2, rel2]
             if len(query) == 3 and isinstance(query[2], str) and query[2] == "2u":
                 (anchor1, rel1), (anchor2, rel2), _ = query
                 query_tensor = torch.tensor([anchor1, rel1, anchor2, rel2], dtype=torch.long)
-            # Check if it's a 2ip query: ((anchor1, rel1), (anchor2, rel2), rel3, "2ip")
+            # 2i: ((anchor1, rel1), (anchor2, rel2), "2i") → [anchor1, rel1, anchor2, rel2]
+            elif len(query) == 3 and isinstance(query[2], str) and query[2] == "2i":
+                (anchor1, rel1), (anchor2, rel2), _ = query
+                query_tensor = torch.tensor([anchor1, rel1, anchor2, rel2], dtype=torch.long)
+            # pi: ((anchor1, rel1, rel2), (anchor2, rel3), "pi") → [anchor1, rel1, rel2, anchor2, rel3]
+            elif len(query) == 3 and isinstance(query[2], str) and query[2] == "pi":
+                (anchor1, rel1, rel2), (anchor2, rel3), _ = query
+                query_tensor = torch.tensor([anchor1, rel1, rel2, anchor2, rel3], dtype=torch.long)
+            # 2ip: ((anchor1, rel1), (anchor2, rel2), rel3, "2ip") → [anchor1, rel1, anchor2, rel2, rel3]
             elif len(query) == 4 and isinstance(query[3], str) and query[3] == "2ip":
                 (anchor1, rel1), (anchor2, rel2), rel3, _ = query
                 query_tensor = torch.tensor([anchor1, rel1, anchor2, rel2, rel3], dtype=torch.long)
-            # 3p query: (entity, (relation1, relation2, relation3))
+            # up: ((anchor1, rel1), (anchor2, rel2), rel3, "up") → [anchor1, rel1, anchor2, rel2, rel3]
+            elif len(query) == 4 and isinstance(query[3], str) and query[3] == "up":
+                (anchor1, rel1), (anchor2, rel2), rel3, _ = query
+                query_tensor = torch.tensor([anchor1, rel1, anchor2, rel2, rel3], dtype=torch.long)
+            # 3i: ((anchor1, rel1), (anchor2, rel2), (anchor3, rel3), "3i") → [anchor1, rel1, anchor2, rel2, anchor3, rel3]
+            elif len(query) == 4 and isinstance(query[3], str) and query[3] == "3i":
+                (anchor1, rel1), (anchor2, rel2), (anchor3, rel3), _ = query
+                query_tensor = torch.tensor([anchor1, rel1, anchor2, rel2, anchor3, rel3], dtype=torch.long)
+            # 3p / 2p: (entity, (rel1, rel2, rel3)) or (entity, (rel1, rel2))
             elif len(query) == 2:
                 entity, relations = query
                 if isinstance(relations, tuple):
-                    # Flatten to [entity, rel1, rel2, rel3] format
                     query_list = [entity] + list(relations)
                     query_tensor = torch.tensor(query_list, dtype=torch.long)
                 else:
-                    # Single relation case
                     query_tensor = torch.tensor([entity, relations], dtype=torch.long)
             else:
                 # Fallback for other formats

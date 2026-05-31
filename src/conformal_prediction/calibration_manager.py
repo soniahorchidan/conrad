@@ -13,6 +13,11 @@ MODEL_TO_QUERY_TYPE = {
     "threehoppipeline": "3p",
     "twounionpipeline": "2u",
     "twointersectprojectpipeline": "2ip",
+    "twohoppipeline": "2p",
+    "twointersectpipeline": "2i",
+    "threeintersectpipeline": "3i",
+    "projectintersectpipeline": "pi",
+    "unionprojectpipeline": "up",
 }
 
 def get_query_type_from_model(model_name: str) -> str:
@@ -190,10 +195,12 @@ class CalibrationManager:
             fraction_opt=fraction_opt, w_neo4j=w_neo4j, w_ultra=w_ultra,
         )
 
-        # Track number of components (3p has 3 hops, 2u has 2 branches) for downstream consumers.
+        # Track number of components for downstream consumers.
+        # Two-component types: 2u (2 branches), 2p (2 hops), 2i (2 branches).
+        # Three-component types: 3p, 2ip, 3i, pi, up.
         try:
             query_type = get_query_type_from_model(self.model_name)
-            num_components = 2 if query_type == "2u" else 3
+            num_components = 2 if query_type in ("2u", "2p", "2i") else 3
         except Exception:
             num_components = 3
 

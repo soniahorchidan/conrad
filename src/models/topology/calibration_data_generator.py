@@ -118,11 +118,17 @@ class CalibrationDataGenerator:
         total_processed = 0
         
         model_class_name = self.model.__class__.__name__
-        is_2u = model_class_name == "TwoUnionPipeline"
-        is_2ip = model_class_name == "TwoIntersectProjectPipeline"
-        # 2u and 2ip use 2D optimization (τ_intersect/τ_branch, τ_proj)
-        # 3p uses 3D optimization (τ1, τ2, τ3)
-        zero_thresholds = [0.0, 0.0] if (is_2u or is_2ip) else [0.0, 0.0, 0.0]
+        _threshold_counts = {
+            "TwoHopPipeline": 2,
+            "TwoIntersectPipeline": 2,
+            "TwoUnionPipeline": 2,
+            "ThreeHopPipeline": 3,
+            "TwoIntersectProjectPipeline": 3,
+            "ThreeIntersectPipeline": 3,
+            "ProjectIntersectPipeline": 3,
+            "UnionProjectPipeline": 3,
+        }
+        zero_thresholds = [0.0] * _threshold_counts.get(model_class_name, 3)
 
         graph_data_on_device = None
 
@@ -161,13 +167,16 @@ class CalibrationDataGenerator:
                 gt_labels = ans_list[idx] if idx < len(ans_list) else None
                 
                 try:
-                    if is_2u:
-                        # For 2u, GT labels are expected to be a list/set of entities (union output).
+                    if model_class_name in ("TwoUnionPipeline", "TwoIntersectPipeline"):
                         vector_nc_scores = self._extract_2u_scores(pred_out, gt_labels)
-                    elif is_2ip:
-                        # For 2ip, GT labels can be dict {1: branch1, 2: branch2, 3: final} or list/set
+                    elif model_class_name in ("TwoIntersectProjectPipeline", "UnionProjectPipeline"):
                         vector_nc_scores = self._extract_2ip_scores(pred_out, gt_labels)
+                    elif model_class_name == "ThreeIntersectPipeline":
+                        vector_nc_scores = self._extract_3i_scores(pred_out, gt_labels)
+                    elif model_class_name == "ProjectIntersectPipeline":
+                        vector_nc_scores = self._extract_pi_scores(pred_out, gt_labels)
                     else:
+                        # ThreeHopPipeline, TwoHopPipeline, NonVector3HopNeural
                         vector_nc_scores = self._extract_vector_scores(pred_out, gt_labels)
 
                     all_scores.append(vector_nc_scores)
@@ -382,6 +391,110 @@ class CalibrationDataGenerator:
             "projection_paths": pred_out.get("projection_paths", []),  # ADD THIS LINE - preserve path-aware data
         }
         
+    def _extract_3i_scores(self, pred_out: Dict[str, Any], gt_labels: Optional[Any] = None) -> Dict[str, Any]:
+        """Extract calibration scores for 3i (ThreeIntersectPipeline) — three independent branches."""
+        scores1 = pred_out["branch1"]["scores"]
+        scores2 = pred_out["branch2"]["scores"]
+        scores3 = pred_out["branch3"]["scores"]
+
+        must_include: set = set()
+        if gt_labels is not None:
+            gt: list = []
+            if isinstance(gt_labels, (list, set)):
+                gt = [int(x) for x in gt_labels]
+            elif isinstance(gt_labels, dict):
+                for v in gt_labels.values():
+                    if isinstance(v, (list, set)):
+                        gt.extend(int(x) for x in v)
+            if gt:
+                combined = torch.minimum(
+                    torch.minimum(scores1.squeeze(0), scores2.squeeze(0)),
+                    scores3.squeeze(0),
+                )
+                must_include = {int(i) for i in gt if 0 <= int(i) < combined.size(0)}
+
+        mi = must_include if must_include else None
+        return {
+            "branch1": {"nodes": pred_out["branch1"].get("nodes", []),
+                        "scores": self._process_single_hop_scores(scores1, must_include=mi)},
+            "branch2": {"nodes": pred_out["branch2"].get("nodes", []),
+                        "scores": self._process_single_hop_scores(scores2, must_include=mi)},
+            "branch3": {"nodes": pred_out["branch3"].get("nodes", []),
+                        "scores": self._process_single_hop_scores(scores3, must_include=mi)},
+        }
+
+    def _extract_pi_scores(self, pred_out: Dict[str, Any], gt_labels: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        Extract calibration scores for pi (ProjectIntersectPipeline).
+
+        pred_out keys:
+          chain_hop1: {"nodes": [...], "scores": Tensor[1, E]}
+          chain_hop2: {"nodes": [...], "scores": [{"parent": int, "scores": Tensor[1, E]}, ...]}
+          branch_1p:  {"nodes": [...], "scores": Tensor[1, E]}
+        """
+        chain_hop1_data = pred_out.get("chain_hop1", {})
+        chain_hop2_data = pred_out.get("chain_hop2", {})
+        branch_1p_data  = pred_out.get("branch_1p", {})
+
+        ch1_scores = chain_hop1_data.get("scores")
+        ch2_paths  = chain_hop2_data.get("scores", [])
+        b1p_scores = branch_1p_data.get("scores")
+
+        must_ch1: set = set()
+        must_ch2: set = set()
+        must_1p:  set = set()
+
+        if gt_labels is not None:
+            if isinstance(gt_labels, dict):
+                gt_int  = set(gt_labels.get("chain_intermediate", gt_labels.get(1, [])))
+                gt_res  = set(gt_labels.get("chain_result",        gt_labels.get(2, [])))
+                gt_final = set(gt_labels.get("final",              gt_labels.get(3, [])))
+                gt_1p   = set(gt_labels.get("1p_result", [])) | gt_final
+            elif isinstance(gt_labels, (list, set)):
+                gt_int = set()
+                gt_res = set(gt_labels)
+                gt_final = set(gt_labels)
+                gt_1p = set(gt_labels)
+            else:
+                gt_int = gt_res = gt_final = gt_1p = set()
+
+            if ch1_scores is not None and gt_int:
+                size = ch1_scores.squeeze(0).size(0)
+                must_ch1 = {int(i) for i in gt_int if 0 <= int(i) < size}
+            must_ch2 = {int(i) for i in gt_res}
+            if b1p_scores is not None and gt_1p:
+                size = b1p_scores.squeeze(0).size(0)
+                must_1p = {int(i) for i in gt_1p if 0 <= int(i) < size}
+
+        _empty = {'indices': torch.empty(0, dtype=torch.long),
+                  'values':  torch.empty(0, dtype=torch.float32), 'shape': 0}
+
+        ch1_processed = (
+            self._process_single_hop_scores(ch1_scores, must_include=must_ch1 or None)
+            if ch1_scores is not None else _empty
+        )
+
+        ch2_processed = []
+        for path in ch2_paths:
+            if isinstance(path, dict) and 'parent' in path and 'scores' in path:
+                ch2_processed.append({
+                    'parent': int(path['parent']),
+                    'scores': self._process_single_hop_scores(
+                        path['scores'], must_include=must_ch2 or None
+                    ),
+                })
+
+        b1p_processed = (
+            self._process_single_hop_scores(b1p_scores, must_include=must_1p or None)
+            if b1p_scores is not None else _empty
+        )
+
+        return {
+            "chain_hop1": {"nodes": chain_hop1_data.get("nodes", []), "scores": ch1_processed},
+            "chain_hop2": ch2_processed,
+            "branch_1p":  {"nodes": branch_1p_data.get("nodes", []),  "scores": b1p_processed},
+        }
+
     def _extract_vector_scores(self, pred_out: Dict[str, Dict[str, Any]], 
                                gt_labels: Optional[Dict[int, List[int]]] = None) -> Dict[str, Any]:
         """

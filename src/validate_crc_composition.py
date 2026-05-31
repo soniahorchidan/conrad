@@ -50,7 +50,12 @@ class BenchmarkConfig:
         "threehoppipeline": "3p_pipeline",
         "twounionpipeline": "2u_pipeline",
         "twointersectprojectpipeline": "2ip_pipeline",
-        "nonvector3hopneural": "3p_pipeline"
+        "nonvector3hopneural": "3p_pipeline",
+        "twohoppipeline": "2p_pipeline",
+        "twointersectpipeline": "2i_pipeline",
+        "threeintersectpipeline": "3i_pipeline",
+        "projectintersectpipeline": "pi_pipeline",
+        "unionprojectpipeline": "up_pipeline",
     }
     
     def load_lambdas_from_file(self) -> Dict[float, np.ndarray]:
@@ -160,11 +165,16 @@ class CRCBenchmarkValidator:
                 lambdas_dict = self.config.load_lambdas_from_file()
                 logging.info(f"Loaded lambdas for {len(lambdas_dict)} confidence levels")
                 
+                # Derive num_hops from the actual lambda vector length so it reflects
+                # the topology (e.g. 2 for 2p/2i/2u, 3 for 3p/2ip/3i/pi/up).
+                first_lambda = next(iter(lambdas_dict.values())) if lambdas_dict else []
+                num_hops = int(len(first_lambda))
+
                 # Set the metadata on the conformal prediction object
                 metadata_calibrate = {
                     'calibrated_alphas': lambdas_dict,
                     'vector_scores': True,
-                    'num_hops': 3,
+                    'num_hops': num_hops,
                     'note': f'Using pre-calibrated lambda values from {self.config.lambdas_file_path}'
                 }
                 model_factory_pipeline.model.conformal_prediction.metadata = metadata_calibrate
@@ -183,62 +193,98 @@ class CRCBenchmarkValidator:
 
         return model_factory_pipeline, db_controller
     
-    def parse_query(self, query: str) -> Tuple[Any, List[int], float]:
+    def parse_query(self, query: str) -> Tuple[List[int], float]:
         """
-        Parse query string to extract query components.
-        
-        Supports:
-        - 3p queries: query((entity_id, (rel1, rel2, rel3)))
-        - 2u queries: query(((anchor1, rel1), (anchor2, rel2), '2u'))
-        - 2ip queries: query(((anchor1, rel1), (anchor2, rel2), rel3, '2ip'))
-        
-        Returns:
-            Tuple of (entity_id_or_tuple, rel_types, confidence)
+        Parse query string into a flat list of ints in the order each pipeline's
+        tensor expects, plus the confidence.
+
+        Group order in each regex matches the pipeline's tensor layout:
+          3p  → [e, r1, r2, r3]                (ThreeHopPipeline)
+          2p  → [e, r1, r2]                    (TwoHopPipeline)
+          2ip → [a1, r1, a2, r2, r3]           (TwoIntersectProjectPipeline)
+          up  → [a1, r1, a2, r2, r3]           (UnionProjectPipeline)
+          3i  → [a1, r1, a2, r2, a3, r3]       (ThreeIntersectPipeline)
+          pi  → [a1, r1, r2, a2, r3]           (ProjectIntersectPipeline)
+          2u  → [a1, r1, a2, r2]               (TwoUnionPipeline)
+          2i  → [a1, r1, a2, r2]               (TwoIntersectPipeline)
+
+        Order matters: 3p must be tried before 2p so a 3-rel chain isn't
+        truncated by the 2-rel pattern.
         """
-        # Try 3p format: query((entity_id, (rel1, rel2, rel3)))
-        simple_3p_match = re.search(r'query\(\((\d+),\s*\((\d+),\s*(\d+),\s*(\d+)\)\)\)', query)
-        if simple_3p_match:
-            entity_id = int(simple_3p_match.group(1))
-            rel_types = [int(simple_3p_match.group(2)), int(simple_3p_match.group(3)), int(simple_3p_match.group(4))]
-            return entity_id, rel_types, 0.7
-        
-        # Try 2ip format: query(((anchor1, rel1), (anchor2, rel2), rel3, '2ip'))
-        simple_2ip_match = re.search(r'query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*(\d+),\s*[\'"]2ip[\'"]\)\)', query)
-        if simple_2ip_match:
-            anchor1 = int(simple_2ip_match.group(1))
-            rel1 = int(simple_2ip_match.group(2))
-            anchor2 = int(simple_2ip_match.group(3))
-            rel2 = int(simple_2ip_match.group(4))
-            rel3 = int(simple_2ip_match.group(5))
-            # Return as tuple for 2ip queries: (anchor1, anchor2), [rel1, rel2, rel3]
-            return (anchor1, anchor2), [rel1, rel2, rel3], 0.7
-        
-        # Try 2u format: query(((anchor1, rel1), (anchor2, rel2), '2u'))
-        simple_2u_match = re.search(r'query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*[\'"]2u[\'"]\)\)', query)
-        if simple_2u_match:
-            anchor1 = int(simple_2u_match.group(1))
-            rel1 = int(simple_2u_match.group(2))
-            anchor2 = int(simple_2u_match.group(3))
-            rel2 = int(simple_2u_match.group(4))
-            # Return as tuple for 2u queries: (anchor1, anchor2), [rel1, rel2]
-            return (anchor1, anchor2), [rel1, rel2], 0.7
-        
-        # Try verbose format (legacy)
+        # 3p: query((e, (r1, r2, r3)))
+        m = re.search(r'query\(\((\d+),\s*\((\d+),\s*(\d+),\s*(\d+)\)\)\)', query)
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # 2p: query((e, (r1, r2)))
+        m = re.search(r'query\(\((\d+),\s*\((\d+),\s*(\d+)\)\)\)', query)
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # 2ip: query(((a1, r1), (a2, r2), r3, '2ip'))
+        m = re.search(
+            r"query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*(\d+),\s*['\"]2ip['\"]\)\)",
+            query,
+        )
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # up: query(((a1, r1), (a2, r2), r3, 'up'))
+        m = re.search(
+            r"query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*(\d+),\s*['\"]up['\"]\)\)",
+            query,
+        )
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # 3i: query(((a1, r1), (a2, r2), (a3, r3), '3i'))
+        m = re.search(
+            r"query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*['\"]3i['\"]\)\)",
+            query,
+        )
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # pi: query(((a1, r1, r2), (a2, r3), 'pi'))
+        m = re.search(
+            r"query\(\(\((\d+),\s*(\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*['\"]pi['\"]\)\)",
+            query,
+        )
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # 2u: query(((a1, r1), (a2, r2), '2u'))
+        m = re.search(
+            r"query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*['\"]2u['\"]\)\)",
+            query,
+        )
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # 2i: query(((a1, r1), (a2, r2), '2i'))
+        m = re.search(
+            r"query\(\(\((\d+),\s*(\d+)\),\s*\((\d+),\s*(\d+)\),\s*['\"]2i['\"]\)\)",
+            query,
+        )
+        if m:
+            return [int(g) for g in m.groups()], 0.7
+
+        # Verbose format (legacy 3p): Entity {id: X} ... Relation {type: Y} x3
         entity_match = re.search(r'Entity \{id: (\d+)\}', query)
         if not entity_match:
             raise ValueError(f"Could not extract entity ID from query: {query}")
         entity_id = int(entity_match.group(1))
-        
+
         relation_matches = re.findall(r'Relation \{type: (\d+)\}', query)
         if len(relation_matches) != 3:
             raise ValueError(f"Expected 3 relations, found {len(relation_matches)} in query: {query}")
-        
+
         rel_types = [int(r) for r in relation_matches]
-        
+
         confidence_match = re.search(r'WITH AT LEAST ([\d.]+) CONFIDENCE', query)
         confidence = float(confidence_match.group(1)) if confidence_match else 0.7
-        
-        return entity_id, rel_types, confidence
+
+        return [entity_id] + rel_types, confidence
     
     def run_prediction(self, model, query_tensor: torch.Tensor, 
                        confidence: float, graph_data: Any) -> Tuple[List[List[int]], Optional[Dict[str, List[int]]]]:
@@ -301,16 +347,14 @@ class CRCBenchmarkValidator:
                            ground_truth: List[int], override_confidence: float = None) -> Optional[QueryResult]:
         """Process a single query and return results."""
         try:
-            entity_or_tuple, rel_types, confidence = self.parse_query(query)
+            query_data, confidence = self.parse_query(query)
             if override_confidence is not None:
                 confidence = override_confidence
-            
-            query_tensor = self._build_query_tensor(entity_or_tuple, rel_types)
-            
-            # Validate tensor shape based on query type
-            expected_shape = (1, 5) if len(rel_types) == 3 and isinstance(entity_or_tuple, tuple) else (1, 4)
-            assert query_tensor.shape == expected_shape, f"Expected tensor shape {expected_shape}, got {query_tensor.shape}"
-            
+
+            query_tensor = torch.tensor([query_data], dtype=torch.long)
+            # Per-topology length validation happens inside each pipeline's
+            # _handle_confidence_modes via the expected_length argument.
+
             start_time = time.time()
             predicted_batch, metadata = self.run_prediction(model, query_tensor, confidence, graph_data)
             query_time_ms = (time.time() - start_time) * 1000
@@ -383,30 +427,14 @@ class CRCBenchmarkValidator:
         logging.info(f"Total time to process all benchmark queries: {total_time_seconds:.2f}s ({total_time_ms:.2f}ms) for {total_queries_processed} queries")
         print(f"\nTotal time to process all benchmark queries: {total_time_seconds:.2f}s ({total_time_ms:.2f}ms) for {total_queries_processed} queries")
     
-    def _build_query_tensor(self, entity_or_tuple: Any, rel_types: List[int]) -> torch.Tensor:
-        """Build query tensor from parsed query components."""
-        if isinstance(entity_or_tuple, tuple):
-            anchor1, anchor2 = entity_or_tuple
-            if len(rel_types) == 2:
-                return torch.tensor([[anchor1, rel_types[0], anchor2, rel_types[1]]], dtype=torch.long)
-            elif len(rel_types) == 3:
-                return torch.tensor([[anchor1, rel_types[0], anchor2, rel_types[1], rel_types[2]]], dtype=torch.long)
-            else:
-                raise ValueError(f"Unexpected number of relations for tuple query: {len(rel_types)}")
-        else:
-            return torch.tensor([[entity_or_tuple] + rel_types], dtype=torch.long)
-    
     def _build_batch_tensor(self, queries: List[str], override_confidence: float = None) -> Tuple[torch.Tensor, float]:
-        """Parse queries and build a batched query tensor."""
-        query_tensors = []
-        for query in queries:
-            entity_or_tuple, rel_types, confidence = self.parse_query(query)
-            if override_confidence is not None:
-                confidence = override_confidence
-            query_tensor = self._build_query_tensor(entity_or_tuple, rel_types)
-            query_tensors.append(query_tensor)
-        
-        batch_query = torch.cat(query_tensors, dim=0)
+        """Parse queries and build a batched query tensor.
+
+        All queries in a batch share a query_type and therefore have the same
+        flat-row length, so torch.tensor over the list yields a uniform 2-D tensor.
+        """
+        rows = [self.parse_query(q)[0] for q in queries]
+        batch_query = torch.tensor(rows, dtype=torch.long)
         batch_confidence = override_confidence or self.config.confidence
         return batch_query, batch_confidence
     
@@ -666,24 +694,45 @@ class CRCBenchmarkValidator:
                 print(f"Skipping calibration query {i+1} with {len(ground_truth)} GT entities (max={self.config.max_gt_size})")
                 continue
             
-            # Convert query format based on query type
-            if self.config.query_type == "2u_pipeline":
-                # 2u query: ((anchor1, rel1), (anchor2, rel2), "2u")
-                (anchor1, rel1), (anchor2, rel2), _ = query
-                query_tensor = torch.tensor([[anchor1, rel1, anchor2, rel2]], dtype=torch.long)
-            elif self.config.query_type == "2ip_pipeline":
-                # 2ip query: ((anchor1, rel1), (anchor2, rel2), rel3, "2ip")
-                (anchor1, rel1), (anchor2, rel2), rel3, _ = query
-                query_tensor = torch.tensor([[anchor1, rel1, anchor2, rel2, rel3]], dtype=torch.long)
-            else:
-                # 3p query: (entity_id, (rel1, rel2, rel3))
+            # Convert calibration .pkl tuple to the flat tensor row each pipeline expects.
+            qtype = self.config.query_type
+            if qtype == "3p_pipeline":
+                # (entity_id, (rel1, rel2, rel3))
                 entity_id, rel_types = query
-                rel_types = list(rel_types)
-                query_tensor = torch.tensor([[entity_id] + rel_types], dtype=torch.long)
-            
-            # Validate tensor shape
-            expected_shape = (1, 5) if self.config.query_type == "2ip_pipeline" else (1, 4)
-            assert query_tensor.shape == expected_shape, f"Expected tensor shape {expected_shape}, got {query_tensor.shape}"
+                row = [entity_id] + list(rel_types)
+            elif qtype == "2p_pipeline":
+                # (entity_id, (rel1, rel2))
+                entity_id, rel_types = query
+                row = [entity_id] + list(rel_types)
+            elif qtype == "2u_pipeline":
+                # ((a1, r1), (a2, r2), "2u")
+                (a1, r1), (a2, r2), _ = query
+                row = [a1, r1, a2, r2]
+            elif qtype == "2i_pipeline":
+                # ((a1, r1), (a2, r2), "2i")
+                (a1, r1), (a2, r2), _ = query
+                row = [a1, r1, a2, r2]
+            elif qtype == "2ip_pipeline":
+                # ((a1, r1), (a2, r2), r3, "2ip")
+                (a1, r1), (a2, r2), r3, _ = query
+                row = [a1, r1, a2, r2, r3]
+            elif qtype == "up_pipeline":
+                # ((a1, r1), (a2, r2), r3, "up")
+                (a1, r1), (a2, r2), r3, _ = query
+                row = [a1, r1, a2, r2, r3]
+            elif qtype == "3i_pipeline":
+                # ((a1, r1), (a2, r2), (a3, r3), "3i")
+                (a1, r1), (a2, r2), (a3, r3), _ = query
+                row = [a1, r1, a2, r2, a3, r3]
+            elif qtype == "pi_pipeline":
+                # ((a1, r1, r2), (a2, r3), "pi")
+                (a1, r1, r2), (a2, r3), _ = query
+                row = [a1, r1, r2, a2, r3]
+            else:
+                raise ValueError(f"Unsupported calibration query_type: {qtype}")
+
+            query_tensor = torch.tensor([row], dtype=torch.long)
+            # Per-topology length is validated inside each pipeline's _handle_confidence_modes.
             
             # Run prediction with configured confidence
             start_time = time.time()
@@ -895,7 +944,7 @@ def main():
     model_factory_pipeline, db_controller = validator.setup_model_and_calibration(inf_args)
     
     # Run benchmark queries
-    logging.info("Running benchmark queries with calibrated 3-hop model...")
+    logging.info(f"Running benchmark queries with calibrated {inf_args.model_to_infer} model...")
     
     # Get graph data for the model
     graph_data = get_graph(db_controller, inf_args.device, augment_inverse_edges=True, relation_graph=True)

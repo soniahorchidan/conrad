@@ -74,6 +74,11 @@ def is_vector_model(model_name: str) -> bool:
         "threehoppipeline",
         "twounionpipeline",
         "twointersectprojectpipeline",
+        "twohoppipeline",
+        "twointersectpipeline",
+        "threeintersectpipeline",
+        "projectintersectpipeline",
+        "unionprojectpipeline",
     }
 
 
@@ -161,9 +166,11 @@ def validate_model_name(model_name: str) -> None:
     supported_models = {
         "ultra",
         "dbexecmodel", "multihoppredictor", "threehoppipeline",
-        "twounionpipeline", "twointersectprojectpipeline"
+        "twounionpipeline", "twointersectprojectpipeline",
+        "twohoppipeline", "twointersectpipeline", "threeintersectpipeline",
+        "projectintersectpipeline", "unionprojectpipeline",
     }
-    
+
     if model_name not in supported_models:
         raise ValueError(f"Model {model_name} not supported. Supported models: {supported_models}")
 
@@ -193,9 +200,15 @@ def validate_calibration_data(cal_scores: Union[np.ndarray, List[Dict]], true_la
             if not isinstance(sample, dict):
                 raise ValueError("Path-aware calibration data must be list of dicts")
 
-            # Support both 3p (hop1/hop2/hop3) and 2u (branch1/branch2) vector formats.
+            # Per-topology key shapes:
+            #   - chain (2p, 3p):              hop1, hop2 [, hop3]
+            #   - pi:                          chain_hop1, chain_hop2, branch_1p
+            #   - branch (2u, 2i, 3i, 2ip, up): branch1, branch2 [, branch3 / projection]
             if "hop1" in sample:
-                required_keys = ["hop1", "hop2", "hop3"]
+                # 2p emits hop1+hop2 only; 3p emits hop1+hop2+hop3. Don't require hop3.
+                required_keys = ["hop1", "hop2"]
+            elif "chain_hop1" in sample:
+                required_keys = ["chain_hop1", "chain_hop2", "branch_1p"]
             elif "branch1" in sample:
                 required_keys = ["branch1", "branch2"]
             else:

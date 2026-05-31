@@ -18,7 +18,12 @@ class ModelFactory:
         self.model_to_infer = inf_args.model_to_infer
         self.inf_args = inf_args
         # Extract model-specific arguments from model arguments
-        if self.model_to_infer.lower() in ["ultra", "dbexecmodel", "multihoppredictor", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline", "nonvector3hopneural"]:
+        _pipeline_names = [
+            "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline",
+            "twohoppipeline", "twointersectpipeline", "threeintersectpipeline",
+            "projectintersectpipeline", "unionprojectpipeline",
+        ]
+        if self.model_to_infer.lower() in ["ultra", "dbexecmodel", "multihoppredictor", "nonvector3hopneural"] + _pipeline_names:
             self.model_parser = ultra_parse_args
             # mps not supported for ULTRA
             if inf_args.device == "mps":
@@ -54,7 +59,12 @@ class ModelFactory:
                 logging.info("Underlying ULTRA model set to eval mode")
 
     def load_model(self):
-        if self.model_to_infer.lower() not in ["dbexecmodel", "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline", "nonvector3hopneural"]:
+        _vector_pipeline_names = [
+            "threehoppipeline", "twounionpipeline", "twointersectprojectpipeline",
+            "twohoppipeline", "twointersectpipeline", "threeintersectpipeline",
+            "projectintersectpipeline", "unionprojectpipeline",
+        ]
+        if self.model_to_infer.lower() not in ["dbexecmodel", "nonvector3hopneural"] + _vector_pipeline_names:
             # Check for ultra_args.json first (standard checkpoint structure)
             if self.model_to_infer.lower() == "multihoppredictor":
                 model_args_dict_path = os.path.join(
@@ -118,7 +128,7 @@ class ModelFactory:
         if hasattr(self.inf_args, 'msp_threshold'):
             self.model_args.msp_threshold = self.inf_args.msp_threshold
 
-        if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
+        if self.model_to_infer.lower() in _vector_pipeline_names:
             # Load ULTRA model (once)
             inf_args_ultra = Namespace(**vars(self.inf_args))
             inf_args_ultra.model_to_infer = "ULTRA"
@@ -171,7 +181,7 @@ class ModelFactory:
                 logging.info(f"ULTRA inference configured: Using {num_gpus_used} GPU(s)")
         # Initialize conformal prediction (only for pipeline models)
         try:
-            if self.model_to_infer.lower() in ["threehoppipeline", "twounionpipeline", "twointersectprojectpipeline"]:
+            if self.model_to_infer.lower() in _vector_pipeline_names:
                 # Create proper args for VectorConformalRiskControl
                 vector_crc_args = conformal_prediction_parse_args({})
                 vector_crc_args.load_path = self.inf_args.load_path

@@ -21,6 +21,7 @@ NEO4J_HOST="localhost"
 NEO4J_BOLT_PORT="7687"
 DATASET=""
 DELETE_EDGES_PERC=""
+DELETION_STRATEGY="uniform"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -41,12 +42,21 @@ while [[ $# -gt 0 ]]; do
             DELETE_EDGES_PERC="$2"
             shift 2
             ;;
+        --deletion-strategy)
+            DELETION_STRATEGY="$2"
+            shift 2
+            ;;
         *)
             log ERROR "Unknown argument: $1"
             exit 1
             ;;
     esac
 done
+
+if [ "${DELETION_STRATEGY}" != "uniform" ] && [ "${DELETION_STRATEGY}" != "stratified" ]; then
+    log ERROR "Unsupported --deletion-strategy: ${DELETION_STRATEGY} (expected 'uniform' or 'stratified')"
+    exit 1
+fi
 
 # Validate mandatory arguments
 if [ -z "${DELETE_EDGES_PERC}" ]; then
@@ -212,35 +222,40 @@ fi
 # Check if queries already exist.
 # Note: test queries are stored as FILES named `queries` and `gt` (not directories).
 QUERIES_EXIST=true
-if [ ! -s "${CALIBRATION_BASE_DIR}/3p_pipeline/queries.pkl" ] || \
-   [ ! -s "${CALIBRATION_BASE_DIR}/3p_pipeline/answers.pkl" ] || \
-   [ ! -s "${CALIBRATION_BASE_DIR}/2ip_pipeline/queries.pkl" ] || \
-   [ ! -s "${CALIBRATION_BASE_DIR}/2ip_pipeline/answers.pkl" ] || \
-   [ ! -s "${CALIBRATION_BASE_DIR}/2u_pipeline/queries.pkl" ] || \
-   [ ! -s "${CALIBRATION_BASE_DIR}/2u_pipeline/answers.pkl" ] || \
-   [ ! -s "${TEST_BASE_DIR}/3p_pipeline/queries" ] || \
-   [ ! -s "${TEST_BASE_DIR}/3p_pipeline/gt" ] || \
-   [ ! -s "${TEST_BASE_DIR}/2ip_pipeline/queries" ] || \
-   [ ! -s "${TEST_BASE_DIR}/2ip_pipeline/gt" ] || \
-   [ ! -s "${TEST_BASE_DIR}/2u_pipeline/queries" ] || \
-   [ ! -s "${TEST_BASE_DIR}/2u_pipeline/gt" ]; then
-    QUERIES_EXIST=false
-fi
+for PIPELINE in 3p_pipeline 2p_pipeline 2ip_pipeline 2u_pipeline 2i_pipeline 3i_pipeline pi_pipeline up_pipeline; do
+    if [ ! -s "${CALIBRATION_BASE_DIR}/${PIPELINE}/queries.pkl" ] || \
+       [ ! -s "${CALIBRATION_BASE_DIR}/${PIPELINE}/answers.pkl" ] || \
+       [ ! -s "${TEST_BASE_DIR}/${PIPELINE}/queries" ] || \
+       [ ! -s "${TEST_BASE_DIR}/${PIPELINE}/gt" ]; then
+        QUERIES_EXIST=false
+        break
+    fi
+done
 
 if [ "$QUERIES_EXIST" = true ]; then
     log INFO "Queries already exist in ${CRC_DATA_DIR}, skipping generation"
 else
-    log INFO "Generating and splitting calibration queries (3p, 2ip, and 2u)"
+    log INFO "Generating and splitting calibration queries (3p, 2p, 2ip, 2u, 2i, 3i, pi, up)"
     mkdir -p "${CRC_DATA_DIR}"
     python3 "${REPO_ROOT}/src/sampler/calibration_sampler.py" \
         --neo4j-host "${NEO4J_HOST}" \
         --neo4j-bolt-port "${NEO4J_BOLT_PORT}" \
         --generate-3p \
+        --generate-2p \
         --generate-2ip \
         --generate-2u \
+        --generate-2i \
+        --generate-3i \
+        --generate-pi \
+        --generate-up \
         --num-queries 5000 \
+        --num-2p-queries 5000 \
         --num-2ip-queries 5000 \
         --num-2u-queries 5000 \
+        --num-2i-queries 5000 \
+        --num-3i-queries 5000 \
+        --num-pi-queries 5000 \
+        --num-up-queries 5000 \
         --size-ratio 1.0 \
         --max-hop-size 50 \
         --extract-intermediate \
@@ -249,8 +264,13 @@ else
         --calib-path "${CALIBRATION_BASE_DIR}"
 fi
 
-log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random"
-python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
+if [ "${DELETION_STRATEGY}" = "stratified" ]; then
+    log INFO "Deleting ${DELETE_EDGES_PERC}% of edges (degree-stratified)"
+    python3 "${REPO_ROOT}/scripts/delete_stratified_edges.py" --perc "${DELETE_EDGES_PERC}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
+else
+    log INFO "Deleting ${DELETE_EDGES_PERC}% of edges at random (uniform)"
+    python3 "${REPO_ROOT}/scripts/delete_random_edges.py" --perc "${DELETE_EDGES_PERC}" --neo4j-host "${NEO4J_HOST}" --neo4j-bolt-port "${NEO4J_BOLT_PORT}"
+fi
 
 log INFO "Calibration generation pipeline completed successfully"
 log INFO "Generated calibration and test queries:"
