@@ -130,3 +130,15 @@ python -u run_baseline_benchmarks.py \
 ## Plots
 
 Under `plots/`: scripts for validity, efficiency, abstention, and baseline comparisons (e.g. `plots/validity/validity.py`, `plots/efficiency/efficiency.py`, `plots/abstention/abstention.py`). They expect results under `artifacts/benchmark/` (and optionally other artifact dirs). Run with the same Python env as the main codebase.
+
+## Supplementary Results
+
+Additional ablation studies and analyses referenced in the paper are available at [`SUPPLEMENTARY_RESULTS.md`](https://github.com/soniahorchidan/conrad/blob/dev-s/SUPPLEMENTARY%20RESULTS.md).
+
+These include:
+- Frontier cap ablation (max_hop_size=50, 100, 200)
+- Non-uniform (stratified) edge deletion experiments
+- Calibration-time candidate pool ablation (K=10, 100, 1000)
+- Latency analysis details
+- Per-query cardinality analysis
+- Abstention rate analysis
